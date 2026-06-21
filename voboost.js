@@ -6,18 +6,14 @@
 
     var STORAGE_KEY = 'player_volume_boost'
 
+    var DEBUG_TOAST = false
+
+    var ICON = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="currentColor" style="margin-right:0.45em;vertical-align:-0.12em"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>'
+
     Lampa.Lang.add({
         voboost_title: {
             en: 'Volume boost',
             uk: 'Підсилення звуку (буст)'
-        },
-        voboost_descr: {
-            en: 'Allows raising the volume above 100% for too quiet videos. Works only in the built-in player.',
-            uk: 'Дозволяє підняти гучність вище 100% для надто тихих відео. Працює лише у вбудованому плеєрі.'
-        },
-        voboost_applied: {
-            en: 'Volume',
-            uk: 'Гучність'
         },
         voboost_conflict: {
             en: 'Volume boost does not work together with normalization. Disable audio normalization in the player settings.',
@@ -42,14 +38,16 @@
         '500': '500%'
     }
 
-    function boostFactor() {
-        var percent = parseInt(Lampa.Storage.get(STORAGE_KEY, '100'), 10) || 100
+    function storedPercent() {
+        return String(parseInt(Lampa.Storage.get(STORAGE_KEY, '100'), 10) || 100)
+    }
 
-        return Math.max(1, percent / 100)
+    function boostFactor() {
+        return Math.max(1, (parseInt(storedPercent(), 10) || 100) / 100)
     }
 
     function boostPercent() {
-        return Math.round(boostFactor() * 100)
+        return parseInt(storedPercent(), 10) || 100
     }
 
     function isMediaElement(video) {
@@ -99,15 +97,15 @@
         if (boostFactor() <= 1) {
             if (current.gain && current.video === video) current.gain.gain.value = 1
 
-            return
+            return false
         }
 
-        if (!isMediaElement(video)) return
+        if (!isMediaElement(video)) return false
 
         if (Lampa.Storage.field('player_normalization')) {
             warnConflict()
 
-            return
+            return false
         }
 
         if (video.__voboost) {
@@ -115,12 +113,12 @@
 
             applyGain()
 
-            return
+            return 'reused'
         }
 
         var ctx = ensureContext()
 
-        if (!ctx) return
+        if (!ctx) return false
 
         resumeContext()
 
@@ -134,7 +132,7 @@
 
             console.log('VoBoost', 'createMediaElementSource error:', e && e.message)
 
-            return
+            return false
         }
 
         var gain = ctx.createGain()
@@ -148,18 +146,101 @@
 
         applyGain()
 
-        Lampa.Noty.show(Lampa.Lang.translate('voboost_applied') + ': ' + boostPercent() + '%')
-
         console.log('VoBoost', 'attached', boostPercent() + '%')
+
+        return 'created'
     }
 
     function onReady() {
+        var video = Lampa.PlayerVideo.video()
+
+        if (attach(video) === 'created') showToast()
+    }
+
+    var toast_el = null
+    var toast_timer = null
+
+    function showToast() {
+        if (!toast_el) {
+            toast_el = $('<div class="loading-layer hide"><div class="loading-layer__box"><div class="loading-layer__text"></div></div></div>')
+
+            toast_el.css({ background: 'transparent', 'pointer-events': 'none' })
+            toast_el.find('.loading-layer__box').css({ 'min-width': 'auto', 'justify-content': 'center', 'padding': '0.5em 1em' })
+            toast_el.find('.loading-layer__text').css({ 'padding': 0, 'margin': 0, 'display': 'flex', 'flex-wrap': 'wrap', 'align-items': 'center', 'justify-content': 'center' })
+
+            $('body').append(toast_el)
+        }
+
+        toast_el.find('.loading-layer__text').html(ICON + boostPercent() + '%')
+
+        toast_el.removeClass('hide')
+
+        clearTimeout(toast_timer)
+
+        if (DEBUG_TOAST) return
+
+        toast_timer = setTimeout(function () {
+            toast_el.addClass('hide')
+        }, 1300)
+    }
+
+    function backToPlayer() {
+        Lampa.Controller.toggle(Lampa.Platform.screen('mobile') ? 'player' : 'player_panel')
+    }
+
+    function changeBoost(value) {
+        Lampa.Storage.set(STORAGE_KEY, value)
+
         attach(Lampa.PlayerVideo.video())
+
+        applyGain()
+
+        showToast()
+    }
+
+    function openBoostSelect() {
+        var selected = storedPercent()
+
+        var items = Object.keys(VALUES).map(function (key) {
+            return { title: VALUES[key], value: key, selected: key === selected }
+        })
+
+        Lampa.Select.show({
+            title: Lampa.Lang.translate('voboost_title'),
+            items: items,
+            onBack: backToPlayer,
+            onSelect: function (a) {
+                changeBoost(a.value)
+
+                backToPlayer()
+            }
+        })
+    }
+
+    function isPlayerSettings(active) {
+        return active && active.nomark && active.items && active.title === Lampa.Lang.translate('title_settings') && Lampa.Player.opened && Lampa.Player.opened()
     }
 
     function listen() {
         Lampa.PlayerVideo.listener.follow('canplay', onReady)
         Lampa.PlayerVideo.listener.follow('play', onReady)
+
+        Lampa.Select.listener.follow('preshow', function (e) {
+            var active = e.active
+
+            if (!isPlayerSettings(active)) return
+
+            var exists = active.items.some(function (it) { return it.voboost })
+
+            if (exists) return
+
+            active.items.push({
+                voboost: true,
+                title: Lampa.Lang.translate('voboost_title'),
+                subtitle: boostPercent() + '%',
+                onSelect: openBoostSelect
+            })
+        })
 
         Lampa.Player.listener.follow('destroy', function () {
             try {
@@ -175,27 +256,5 @@
         })
     }
 
-    function addSettings() {
-        Lampa.SettingsApi.addParam({
-            component: 'player',
-            param: {
-                name: STORAGE_KEY,
-                type: 'select',
-                values: VALUES,
-                default: '100'
-            },
-            field: {
-                name: Lampa.Lang.translate('voboost_title'),
-                description: Lampa.Lang.translate('voboost_descr')
-            },
-            onChange: function () {
-                applyGain()
-
-                Lampa.Settings.update && Lampa.Settings.update()
-            }
-        })
-    }
-
-    addSettings()
     listen()
 })()
