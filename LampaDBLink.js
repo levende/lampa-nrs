@@ -100,14 +100,29 @@ var plugin = (function () {
           ru: 'Ошибка подключения'
         },
         dblink_setup_title: {
-          en: 'One-time database setup',
-          uk: 'Одноразове налаштування бази',
-          ru: 'Разовая настройка базы'
+          en: 'First-time database setup',
+          uk: 'Перше налаштування бази',
+          ru: 'Первая настройка базы'
         },
         dblink_setup_intro: {
-          en: 'Run this once in Supabase SQL Editor (copied to clipboard). After that the plugin creates all tables automatically.',
-          uk: 'Виконайте це один раз у Supabase SQL Editor (уже скопійовано). Після цього плагін створить усі таблиці автоматично.',
-          ru: 'Выполните это один раз в Supabase SQL Editor (уже скопировано). После этого плагин создаст все таблицы автоматически.'
+          en: 'Press "Copy SQL", paste it in Supabase SQL Editor and run. After that the plugin creates all tables automatically.',
+          uk: 'Натисніть "Копіювати SQL", вставте в Supabase SQL Editor і виконайте. Після цього плагін створить усі таблиці автоматично.',
+          ru: 'Нажмите "Копировать SQL", вставьте в Supabase SQL Editor и выполните. После этого плагин создаст все таблицы автоматически.'
+        },
+        dblink_setup_copy: {
+          en: 'Copy SQL',
+          uk: 'Копіювати SQL',
+          ru: 'Копировать SQL'
+        },
+        dblink_setup_copied: {
+          en: 'SQL copied to clipboard',
+          uk: 'SQL скопійовано',
+          ru: 'SQL скопирован'
+        },
+        dblink_setup_copy_fail: {
+          en: 'Copy failed - select the text manually',
+          uk: 'Не вдалося скопіювати - виділіть текст вручну',
+          ru: 'Не удалось скопировать - выделите текст вручную'
         },
         dblink_setup_link: {
           en: 'Open SQL Editor:',
@@ -120,9 +135,9 @@ var plugin = (function () {
           ru: 'Готово, повторить'
         },
         dblink_setup_needed: {
-          en: 'LampaDBLink: one-time DB setup needed (see settings)',
-          uk: 'LampaDBLink: потрібне одноразове налаштування бази (див. налаштування)',
-          ru: 'LampaDBLink: нужна разовая настройка базы (см. настройки)'
+          en: 'LampaDBLink: first-time DB setup needed (see settings)',
+          uk: 'LampaDBLink: потрібне перше налаштування бази (див. налаштування)',
+          ru: 'LampaDBLink: нужна первая настройка базы (см. настройки)'
         },
         dblink_setup_open: {
           en: 'Open SQL Editor',
@@ -1660,7 +1675,7 @@ var plugin = (function () {
             if (!ok) {
               self._connecting = false;
               self._emit('connection', { state: 'error' });
-              var e = new Error('Потрібне одноразове налаштування бази');
+              var e = new Error('Потрібне перше налаштування бази');
               e.needSetup = true;
               throw e;
             }
@@ -6837,12 +6852,36 @@ var plugin = (function () {
       return m ? m[1] : '';
     }
 
+    function copyToClipboard(text) {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.top = '0';
+        ta.style.left = '0';
+        ta.style.opacity = '0';
+        ta.setAttribute('readonly', '');
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        try { ta.setSelectionRange(0, text.length); } catch (e) {}
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+        if (ok) return true;
+      } catch (e) {}
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+
     function showSchemaSetupModal() {
       var ref = getProjectRef();
       var sqlLink = ref ? 'https://supabase.com/dashboard/project/' + ref + '/sql/new' : 'https://supabase.com/dashboard';
-      try {
-        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(BOOTSTRAP_SQL);
-      } catch (e) {}
       var enabledCtrl = Lampa.Controller.enabled().name;
       var html = $('<div style="padding:1em;max-width:44em">' + '<p style="margin-bottom:.6em">' + Lampa.Lang.translate('dblink_setup_intro') + '</p>' + '<pre style="white-space:pre-wrap;word-break:break-word;background:rgba(255,255,255,0.08);padding:1em;border-radius:.5em;font-size:.82em;line-height:1.4">' + escHtml(BOOTSTRAP_SQL) + '</pre>' + '<p style="opacity:.7;font-size:.85em;margin-top:.6em">' + Lampa.Lang.translate('dblink_setup_link') + '<br>' + escHtml(sqlLink) + '</p>' + '</div>');
       Lampa.Modal.open({
@@ -6850,6 +6889,12 @@ var plugin = (function () {
         html: html,
         size: 'medium',
         buttons: [{
+          name: Lampa.Lang.translate('dblink_setup_copy'),
+          onSelect: function onSelect() {
+            var ok = copyToClipboard(BOOTSTRAP_SQL);
+            Lampa.Noty.show(Lampa.Lang.translate(ok ? 'dblink_setup_copied' : 'dblink_setup_copy_fail'));
+          }
+        }, {
           name: Lampa.Lang.translate('dblink_setup_open'),
           onSelect: function onSelect() {
             try {
