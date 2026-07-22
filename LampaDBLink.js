@@ -1105,6 +1105,51 @@ var plugin = (function () {
           uk: 'Перейменувати пристрій',
           ru: 'Переименовать устройство'
         },
+        dblink_device_open: {
+          en: 'Open on this device',
+          uk: 'Відкрити на цьому пристрої',
+          ru: 'Открыть на этом устройстве'
+        },
+        dblink_device_name_title: {
+          en: 'Device name',
+          uk: 'Назва пристрою',
+          ru: 'Имя устройства'
+        },
+        dblink_device_renamed: {
+          en: 'Device renamed',
+          uk: 'Пристрій перейменовано',
+          ru: 'Устройство переименовано'
+        },
+        dblink_nothing_share: {
+          en: 'Nothing to share',
+          uk: 'Немає що надіслати',
+          ru: 'Нечего отправить'
+        },
+        dblink_sent_to: {
+          en: 'Sent to {device}',
+          uk: 'Надіслано на {device}',
+          ru: 'Отправлено на {device}'
+        },
+        dblink_play_on_device: {
+          en: 'Play on device',
+          uk: 'Відтворити на пристрої',
+          ru: 'Воспроизвести на устройстве'
+        },
+        dblink_open_on_device: {
+          en: 'Open on device',
+          uk: 'Відкрити на пристрої',
+          ru: 'Открыть на устройстве'
+        },
+        dblink_select_device: {
+          en: 'Select device',
+          uk: 'Виберіть пристрій',
+          ru: 'Выберите устройство'
+        },
+        dblink_discover_fail: {
+          en: 'Failed to discover devices',
+          uk: 'Не вдалося знайти пристрої',
+          ru: 'Не удалось найти устройства'
+        },
         dblink_device_overlay_reset: {
           en: 'Device overlays reset. Sync profile to apply.',
           uk: 'Налаштування пристрою скинуто. Синхронізуйте профіль.',
@@ -1461,7 +1506,7 @@ var plugin = (function () {
       return '1.0';
     }
 
-    var VERSION = '0.1.0';
+    var VERSION = '0.1.1';
 
     var BOOTSTRAP_SQL = [
       'create or replace function exec_sql(sql text) returns void',
@@ -3476,6 +3521,7 @@ var plugin = (function () {
     function createProfile(profilesTopicId, profilesSyncTopicId, container) {
       Lampa.Input.edit({
         title: 'Profile name',
+        value: '',
         free: true,
         nosave: true,
         align: 'center'
@@ -5167,7 +5213,7 @@ var plugin = (function () {
           _cancel: true
         });
         Lampa.Select.show({
-          title: options.title || 'Select device',
+          title: options.title || Lampa.Lang.translate('dblink_select_device'),
           items: items,
           onBack: function onBack() {
             Lampa.Controller.toggle(enabledCtrl);
@@ -5183,7 +5229,7 @@ var plugin = (function () {
           }
         });
       })["catch"](function () {
-        Lampa.Noty.show('Failed to discover devices');
+        Lampa.Noty.show(Lampa.Lang.translate('dblink_discover_fail'));
         if (options.onCancel) options.onCancel();
       });
     }
@@ -5192,23 +5238,23 @@ var plugin = (function () {
       var manifest = {
         type: 'video',
         version: VERSION,
-        name: 'Open on device',
-        description: 'Open this content on another device',
+        name: Lampa.Lang.translate('dblink_open_on_device'),
+        description: '',
         onContextMenu: function onContextMenu(object) {
           var client = DBLinkClient.getInstance();
           if (!client.isConnected()) return null;
           return {
-            name: 'Open on device',
+            name: Lampa.Lang.translate('dblink_open_on_device'),
             description: ''
           };
         },
         onContextLauch: function onContextLauch(data) {
           var card = Lampa.Utils.clearCard ? Lampa.Utils.clearCard(JSON.parse(JSON.stringify(data))) : data;
           showDevicePicker({
-            title: 'Open on device',
+            title: Lampa.Lang.translate('dblink_open_on_device'),
             onSelect: function onSelect(device) {
               sendOpenCard(device.device_id, card);
-              Lampa.Noty.show('Sent to ' + (device.device_name || 'device'));
+              Lampa.Noty.show(Lampa.Lang.translate('dblink_sent_to').replace('{device}', device.device_name || 'device'));
             }
           });
         }
@@ -5221,12 +5267,12 @@ var plugin = (function () {
         var client = DBLinkClient.getInstance();
         if (!client.isConnected()) return;
         showDevicePicker({
-          title: 'Play on device',
+          title: Lampa.Lang.translate('dblink_play_on_device'),
           onSelect: function onSelect(device) {
             var playdata = Lampa.Player.playdata();
             if (playdata) {
               sendPlayVideo(device.device_id, playdata);
-              Lampa.Noty.show('Sent to ' + (device.device_name || 'device'));
+              Lampa.Noty.show(Lampa.Lang.translate('dblink_sent_to').replace('{device}', device.device_name || 'device'));
             }
           }
         });
@@ -5256,14 +5302,14 @@ var plugin = (function () {
       $broadcastBtn.on('hover:enter hover:click hover:touch', function () {
         var card = Lampa.Activity.extractObject ? Lampa.Activity.extractObject(Lampa.Activity.active()) : null;
         if (!card) {
-          Lampa.Noty.show('Nothing to share');
+          Lampa.Noty.show(Lampa.Lang.translate('dblink_nothing_share'));
           return;
         }
         showDevicePicker({
-          title: 'Open on device',
+          title: Lampa.Lang.translate('dblink_open_on_device'),
           onSelect: function onSelect(device) {
             sendOpenCard(device.device_id, card);
-            Lampa.Noty.show('Sent to ' + (device.device_name || 'device'));
+            Lampa.Noty.show(Lampa.Lang.translate('dblink_sent_to').replace('{device}', device.device_name || 'device'));
           }
         });
       });
@@ -5592,6 +5638,7 @@ var plugin = (function () {
       var last = null;
       var activeTab = 'profiles';
       var _initializing = false;
+      var _profilesSig = null;
       var TABS = ['profiles', 'devices', 'plugins'];
       var tabIdx = 0;
 
@@ -5758,36 +5805,37 @@ var plugin = (function () {
         }
       }
 
-      function renderProfiles() {
+      function renderProfiles(isRefresh) {
         var body = scroll.body(true);
-        body.innerHTML = '';
-        bodyPrep(body);
+        function shellReset() {
+          body.innerHTML = '';
+          bodyPrep(body);
+          body.insertAdjacentHTML('beforeend', renderTabBar());
+          bindTabEvents();
+        }
 
-        body.insertAdjacentHTML('beforeend', renderTabBar());
-        bindTabEvents();
-
+        // \u0421\u0442\u0430\u043d\u0438 \u0431\u0435\u0437 \u0434\u0430\u043d\u0438\u0445 - \u043d\u0430 \u0442\u0438\u0445\u043e\u043c\u0443 \u043e\u043d\u043e\u0432\u043b\u0435\u043d\u043d\u0456 \u043d\u0456\u0447\u043e\u0433\u043e \u043d\u0435 \u0447\u0456\u043f\u0430\u0454\u043c\u043e
         if (_initializing) {
-          showEmpty(body, Lampa.Lang.translate('dblink_loading') || "Loading\u2026");
-          focusFirst();
+          if (!isRefresh) { shellReset(); showEmpty(body, Lampa.Lang.translate('dblink_loading') || "Loading\u2026"); focusFirst(); }
           return;
         }
         if (!currentProfilesTopicId) {
-          showEmpty(body, Lampa.Lang.translate('dblink_no_profiles') || 'No profiles');
-          focusFirst();
+          if (!isRefresh) { shellReset(); showEmpty(body, Lampa.Lang.translate('dblink_no_profiles') || 'No profiles'); focusFirst(); }
           return;
         }
         var client = DBLinkClient.getInstance();
         if (!client.isConnected()) {
-          showEmpty(body, Lampa.Lang.translate('dblink_not_connected') || 'Not connected');
-          focusFirst();
+          if (!isRefresh) { shellReset(); showEmpty(body, Lampa.Lang.translate('dblink_not_connected') || 'Not connected'); focusFirst(); }
           return;
         }
-        showEmpty(body, Lampa.Lang.translate('dblink_loading') || "Loading\u2026");
-        client.getMessages(getChannelId(), currentProfilesTopicId, 50).then(function (msgs) {
 
-          body.querySelectorAll('.dblink-item[style]').forEach(function (el) {
-            el.remove();
-          });
+        // \u041f\u0435\u0440\u0448\u0438\u0439 \u0440\u0435\u043d\u0434\u0435\u0440 \u043f\u043e\u043a\u0430\u0437\u0443\u0454 Loading; \u0442\u0438\u0445\u0435 \u043e\u043d\u043e\u0432\u043b\u0435\u043d\u043d\u044f \u043b\u0438\u0448\u0430\u0454 \u043f\u043e\u0442\u043e\u0447\u043d\u0438\u0439 \u0441\u043f\u0438\u0441\u043e\u043a
+        if (!isRefresh) {
+          shellReset();
+          showEmpty(body, Lampa.Lang.translate('dblink_loading') || "Loading\u2026");
+        }
+
+        client.getMessages(getChannelId(), currentProfilesTopicId, 50).then(function (msgs) {
           var pms = msgs.filter(function (m) {
             var text = m.message || m.text;
             if (!text) return false;
@@ -5798,13 +5846,18 @@ var plugin = (function () {
               return false;
             }
           });
+          var activeId = Lampa.Storage.get('dblink_active_profile', '');
+          var sig = pms.map(function (m) { return String(m.id); }).sort().join(',') + '|' + activeId;
+          // \u0411\u0435\u0437 \u0437\u043c\u0456\u043d - \u0431\u0435\u0437 \u0440\u0435\u0431\u0456\u043b\u0434\u0443 (\u0443\u0441\u0443\u0432\u0430\u0454 \u043c\u0435\u0440\u0435\u0445\u0442\u0456\u043d\u043d\u044f \u0432\u0456\u0434 \u043f\u043e\u043b\u043b\u0456\u043d\u0433\u0443)
+          if (isRefresh && sig === _profilesSig) return;
+          _profilesSig = sig;
+
+          shellReset();
           if (!pms.length) {
             showEmpty(body, Lampa.Lang.translate('dblink_no_profiles') || 'No profiles');
             focusFirst();
             return;
           }
-          var activeId = Lampa.Storage.get('dblink_active_profile', '');
-
           var addEl = createItem('gs-profile-add-item', '+', Lampa.Lang.translate('dblink_create_profile') || 'Create profile', '', null, null);
           addEl.style.gridColumn = '1 / -1';
           body.appendChild(addEl);
@@ -5835,8 +5888,7 @@ var plugin = (function () {
           Profiles.saveProfilesCache(pms);
           focusFirst();
         })["catch"](function () {
-          showEmpty(body, Lampa.Lang.translate('title_error') || 'Error');
-          focusFirst();
+          if (!isRefresh) { shellReset(); showEmpty(body, Lampa.Lang.translate('title_error') || 'Error'); focusFirst(); }
         });
       }
       function bindProfileEvents() {
@@ -5861,6 +5913,7 @@ var plugin = (function () {
       function createProfileHandler() {
         Lampa.Input.edit({
           title: Lampa.Lang.translate('dblink_create_profile') || 'Profile name',
+          value: '',
           free: true,
           nosave: true,
           align: 'center'
@@ -6276,7 +6329,7 @@ var plugin = (function () {
       function showDeviceMenu(did, dname, isThis) {
         var items = [];
         if (!isThis) items.push({
-          title: 'Open on this device',
+          title: Lampa.Lang.translate('dblink_device_open'),
           action: 'open'
         });
         if (isThis) items.push({
@@ -6288,7 +6341,7 @@ var plugin = (function () {
           action: 'import'
         });
         if (isThis) items.push({
-          title: 'Rename device',
+          title: Lampa.Lang.translate('dblink_device_rename'),
           action: 'rename'
         });
         items.push({
@@ -6303,19 +6356,19 @@ var plugin = (function () {
               var a = Lampa.Activity.active();
               if (a && a.card) {
                 Broadcast.sendOpenCard(did, a.card);
-                Lampa.Noty.show('Sent to ' + dname);
+                Lampa.Noty.show(Lampa.Lang.translate('dblink_sent_to').replace('{device}', dname));
               } else {
-                Lampa.Noty.show('Nothing to share');
+                Lampa.Noty.show(Lampa.Lang.translate('dblink_nothing_share'));
               }
             } else if (item.action === 'export') exportBackup();else if (item.action === 'import') importBackup();else if (item.action === 'rename') {
               var c = Lampa.Storage.get('dblink_device_label', getDeviceName());
               input({
-                title: 'Device name',
+                title: Lampa.Lang.translate('dblink_device_name_title'),
                 value: c,
                 onSubmit: function onSubmit(n) {
                   if (n && n.trim()) {
                     Lampa.Storage.set('dblink_device_label', n.trim());
-                    Lampa.Noty.show('Device renamed');
+                    Lampa.Noty.show(Lampa.Lang.translate('dblink_device_renamed'));
                   }
                 }
               });
@@ -6572,7 +6625,7 @@ var plugin = (function () {
           renderProfiles();
           if (refreshTimer) clearInterval(refreshTimer);
           refreshTimer = setInterval(function () {
-            if (activeTab === 'profiles') renderProfiles();
+            if (activeTab === 'profiles') renderProfiles(true);
           }, 15000);
         })["catch"](function (err) {
           if (self.__destroyed) return;
@@ -6691,17 +6744,17 @@ var plugin = (function () {
           var client = DBLinkClient.getInstance();
           if (!client.isConnected()) return null;
           return {
-            name: 'Open on device',
+            name: Lampa.Lang.translate('dblink_open_on_device'),
             description: ''
           };
         },
         onContextLauch: function onContextLauch(data) {
           var card = Lampa.Utils.clearCard ? Lampa.Utils.clearCard(JSON.parse(JSON.stringify(data))) : data;
           Broadcast.showDevicePicker({
-            title: 'Open on device',
+            title: Lampa.Lang.translate('dblink_open_on_device'),
             onSelect: function onSelect(device) {
               Broadcast.sendOpenCard(device.device_id, card);
-              Lampa.Noty.show('Sent to ' + (device.device_name || 'device'));
+              Lampa.Noty.show(Lampa.Lang.translate('dblink_sent_to').replace('{device}', device.device_name || 'device'));
             }
           });
         }
