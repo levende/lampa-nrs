@@ -9,7 +9,7 @@
 
     var META = {
         name: 'LParty',
-        version: '1.0.0',
+        version: '1.1.0',
         author: 'nrsua'
     };
 
@@ -65,7 +65,9 @@
             notice_seeked: function (n) { return n + ' перемотав'; },
             notice_host_changed: function (n) { return 'Новий хост: ' + n; },
             player_create_descr: 'Створити кімнату на цей потік',
-            already_in_room: function (n) { return 'Ви вже в кімнаті "' + n + '"'; }
+            already_in_room: function (n) { return 'Ви вже в кімнаті "' + n + '"'; },
+            leave_btn: 'Покинути кімнату',
+            left_ok: 'Ви покинули кімнату'
         },
         en: {
             menu_title: 'LParty',
@@ -117,7 +119,9 @@
             notice_seeked: function (n) { return n + ' seeked'; },
             notice_host_changed: function (n) { return 'New host: ' + n; },
             player_create_descr: 'Create a room for this stream',
-            already_in_room: function (n) { return 'You are already in room "' + n + '"'; }
+            already_in_room: function (n) { return 'You are already in room "' + n + '"'; },
+            leave_btn: 'Leave room',
+            left_ok: 'You left the room'
         },
         ru: {
             menu_title: 'LParty',
@@ -169,7 +173,9 @@
             notice_seeked: function (n) { return n + ' перемотал'; },
             notice_host_changed: function (n) { return 'Новый хост: ' + n; },
             player_create_descr: 'Создать комнату с этим потоком',
-            already_in_room: function (n) { return 'Вы уже в комнате "' + n + '"'; }
+            already_in_room: function (n) { return 'Вы уже в комнате "' + n + '"'; },
+            leave_btn: 'Покинуть комнату',
+            left_ok: 'Вы покинули комнату'
         }
     };
     var T = i18n[_rawLang] || i18n['en'];
@@ -183,6 +189,9 @@
     var PING_INTERVAL_MS = 20000;
     var ECHO_TIMEOUT_MS = 30000;
     var RECONNECT_MS = 4000;
+
+    var ROOM_ORPHAN_MS = 20000;
+    var EPISODE_SWITCH_MS = 20000;
 
     var SYNC_HEARTBEAT_MS = 2000;
     var SYNC_TOLERANCE_S = 0.30;
@@ -219,6 +228,60 @@
 
     function safe(s) {
         return (s + '').replace(/[<>&"']/g, function (c) { return '&#' + c.charCodeAt(0) + ';'; });
+    }
+
+    var uiPrevController = 'content';
+
+    function controllerName() {
+        try {
+            var e = Lampa.Controller.enabled();
+            return (e && e.name) || '';
+        } catch (err) {
+            return '';
+        }
+    }
+
+    function rememberController() {
+        var name = controllerName();
+        if (name && name !== 'select' && name !== 'keybord' && name !== 'settings_input') uiPrevController = name;
+        return uiPrevController;
+    }
+
+    function restoreController(name) {
+        var target = name || uiPrevController || 'content';
+        try {
+            Lampa.Controller.toggle(target);
+            if (controllerName() === target) return;
+        } catch (err) {}
+        try { Lampa.Controller.toggle('content'); } catch (err) {}
+    }
+
+    function askInput(params, done) {
+        Lampa.Input.edit({
+            title: params.title,
+            value: params.value || '',
+            free: true,
+            nosave: true
+        }, function (value) {
+            restoreController();
+            done(value);
+        });
+    }
+
+    function closeSettings() {
+        var guard = 0;
+        while ($('body').hasClass('settings--open') && guard++ < 4) {
+            var name = controllerName();
+            if (name !== 'settings' && name !== 'settings_component') break;
+            try { Lampa.Controller.back(); } catch (err) { break; }
+        }
+    }
+
+    function playerIsOpen() {
+        try {
+            if (Lampa.Player && typeof Lampa.Player.opened === 'function') return !!Lampa.Player.opened();
+        } catch (err) {}
+        return !!document.querySelector('.player');
     }
 
     var SHA_K = [
@@ -442,7 +505,13 @@
     var currentRoomMeta = { title: '', poster: '', url: '', tmdb_id: 0, source: '', type: '' };
 
     var pidByUid = {};
-    var episodeSwitchPending = false;
+
+    var episodeSwitchAt = 0;
+    var roomAliveAt = 0;
+
+    function markEpisodeSwitch() { episodeSwitchAt = Date.now(); }
+    function clearEpisodeSwitch() { episodeSwitchAt = 0; }
+    function isEpisodeSwitching() { return episodeSwitchAt > 0 && (Date.now() - episodeSwitchAt) < EPISODE_SWITCH_MS; }
 
     var serverTimeOffset = 0;
     var pingSamples = [];
@@ -614,11 +683,27 @@
         }, LOBBY_COLLECT_MS);
     }
 
+    var browserBusy = false;
+
     function openRoomBrowser() {
+        if (browserBusy) return;
+        browserBusy = true;
+
+        rememberController();
+        dropStaleRoom();
+
         Lampa.Noty.show(T.searching);
 
         discoverRooms(function (rooms) {
+            browserBusy = false;
+
+            rememberController();
+
             var items = [];
+
+            if (inRoom) {
+                items.push({ title: '<span style="color:#ff8a80">&#10005; ' + T.leave_btn + ' [' + safe(currentRoomId || '') + ']</span>', action: 'leave' });
+            }
 
             items.push({ title: '<span style="color:#00e676">+ ' + T.create_btn + '</span>', action: 'create' });
             items.push({ title: '<span style="color:#64b5f6">#  ' + T.join_code_btn + '</span>', action: 'code' });
@@ -643,23 +728,27 @@
                 title: T.head_title,
                 items: items,
                 onSelect: function (a) {
+                    restoreController();
+
                     if (a.disabled) return;
+                    if (a.action === 'leave') return manualLeaveRoom();
                     if (a.action === 'create') return askCreateRoom();
                     if (a.action === 'code') return askRoomCode();
                     if (a.room) return tryJoinRoom(a.room);
                 },
-                onBack: function () { Lampa.Controller.toggle('content'); }
+                onBack: function () { restoreController(); }
             });
         });
     }
 
+    function manualLeaveRoom() {
+        if (!inRoom && !joining) return;
+        leaveRoom(true);
+        Lampa.Noty.show(T.left_ok);
+    }
+
     function askRoomCode() {
-        Lampa.Input.edit({
-            title: T.input_room_code,
-            value: '',
-            free: true,
-            nosave: true
-        }, function (val) {
+        askInput({ title: T.input_room_code, value: '' }, function (val) {
             var id = (val || '').toString().trim().toUpperCase();
             if (!id) return;
             tryJoinRoom({ id: id, pwd: 1, name: id });
@@ -667,6 +756,8 @@
     }
 
     function tryJoinRoom(r) {
+        dropStaleRoom();
+
         if (inRoom) {
             Lampa.Noty.show(T.already_in_room(currentRoomName || currentRoomId || ''));
             return;
@@ -675,12 +766,7 @@
         if (!r.pwd) return joinRoom(r.id, '', r.name || r.id);
 
         var prefill = isUsePassword() ? getDefaultPassword() : '';
-        Lampa.Input.edit({
-            title: T.input_join_password,
-            value: prefill,
-            free: true,
-            nosave: true
-        }, function (val) {
+        askInput({ title: T.input_join_password, value: prefill }, function (val) {
             joinRoom(r.id, val || '', r.name || r.id);
         });
     }
@@ -708,9 +794,21 @@
         pidByUid = {};
         echoPending = {};
         pingSamples = [];
-        episodeSwitchPending = false;
+        clearEpisodeSwitch();
+        roomAliveAt = 0;
 
+        createPending = false;
+        if (createTimer) { clearTimeout(createTimer); createTimer = null; }
         if (joinTimer) { clearTimeout(joinTimer); joinTimer = null; }
+    }
+
+    function dropStaleRoom() {
+        if ((inRoom || joining) && !playerIsOpen()) {
+            console.log('[LParty] stale room detected (player closed) - leaving');
+            leaveRoom(true);
+            return true;
+        }
+        return false;
     }
 
     function leaveRoom(sendBye) {
@@ -728,6 +826,7 @@
 
         currentRoomId = roomId;
         currentRoomPassword = password || '';
+        roomAliveAt = Date.now();
 
         room = new Sock({
             channel: roomChannel(roomId, password),
@@ -776,6 +875,7 @@
         }
 
         inRoom = true;
+        roomAliveAt = Date.now();
         currentRoomName = msg.rn || currentRoomName;
         currentRoomOwner = msg.own || null;
         currentRoomMeta = {
@@ -801,6 +901,8 @@
 
         Lampa.Noty.show(T.join_ok(currentRoomName));
 
+        closeSettings();
+
         Lampa.Player.play({
             url: currentRoomMeta.url,
             title: currentRoomMeta.title || currentRoomName,
@@ -817,10 +919,12 @@
                     { title: T.input_url, share: false }
                 ],
                 onSelect: function (a) {
+                    restoreController();
+
                     if (a.share) askRoomDetails({ stream_url: lastStreamUrl, title: lastStreamTitle || '' });
                     else promptStreamUrl();
                 },
-                onBack: function () { Lampa.Controller.toggle('content'); }
+                onBack: function () { restoreController(); }
             });
         } else {
             promptStreamUrl();
@@ -828,34 +932,22 @@
     }
 
     function promptStreamUrl() {
-        Lampa.Input.edit({
-            title: T.input_url,
-            value: '',
-            free: true,
-            nosave: true
-        }, function (val) {
+        askInput({ title: T.input_url, value: '' }, function (val) {
             if (!val) return Lampa.Noty.show(T.need_url);
             askRoomDetails({ stream_url: val, title: '' });
         });
     }
 
     function askRoomDetails(seed) {
-        Lampa.Input.edit({
+        askInput({
             title: T.input_room_name,
-            value: seed.title || ('Room ' + Math.floor(Math.random() * 1000)),
-            free: true,
-            nosave: true
+            value: seed.title || ('Room ' + Math.floor(Math.random() * 1000))
         }, function (name) {
             if (!name) name = 'Room';
             seed.name = name;
 
             if (isUsePassword()) {
-                Lampa.Input.edit({
-                    title: T.input_password,
-                    value: getDefaultPassword(),
-                    free: true,
-                    nosave: true
-                }, function (pwd) {
+                askInput({ title: T.input_password, value: getDefaultPassword() }, function (pwd) {
                     seed.password = pwd || '';
                     createRoom(seed, false);
                 });
@@ -867,8 +959,12 @@
     }
 
     var createPending = false;
+    var createTimer = null;
     function createRoom(seed, hostAlreadyPlaying) {
         if (createPending) return;
+
+        if (!hostAlreadyPlaying) dropStaleRoom();
+
         if (inRoom) {
             Lampa.Noty.show(T.already_in_room(currentRoomName || currentRoomId || ''));
             return;
@@ -894,8 +990,11 @@
 
         connectRoom(id, seed.password || '', function () {
             createPending = false;
+            if (createTimer) { clearTimeout(createTimer); createTimer = null; }
+
             inRoom = true;
             joining = false;
+            roomAliveAt = Date.now();
 
             initialSyncLock = false;
             targetInitialState = null;
@@ -909,6 +1008,8 @@
                 var vid = getVideo();
                 if (vid) roomSend({ t: 'sync', s: vid.paused ? 'paused' : 'playing', p: vid.currentTime || 0 });
             } else {
+                closeSettings();
+
                 Lampa.Player.play({
                     url: currentRoomMeta.url,
                     title: currentRoomMeta.title || currentRoomName,
@@ -917,7 +1018,9 @@
             }
         });
 
-        setTimeout(function () {
+        if (createTimer) clearTimeout(createTimer);
+        createTimer = setTimeout(function () {
+            createTimer = null;
             if (createPending) {
                 createPending = false;
                 Lampa.Noty.show(T.create_fail);
@@ -942,12 +1045,7 @@
         };
 
         if (isUsePassword()) {
-            Lampa.Input.edit({
-                title: T.input_password,
-                value: getDefaultPassword(),
-                free: true,
-                nosave: true
-            }, function (pwd) {
+            askInput({ title: T.input_password, value: getDefaultPassword() }, function (pwd) {
                 seed.password = pwd || '';
                 createRoom(seed, true);
             });
@@ -1040,7 +1138,7 @@
 
             currentRoomMeta.url = m.url;
             currentRoomMeta.title = m.ti || currentRoomMeta.title;
-            episodeSwitchPending = true;
+            markEpisodeSwitch();
             try {
                 Lampa.Player.play({
                     url: m.url,
@@ -1258,6 +1356,14 @@
     }
 
     setInterval(function () {
+        if (inRoom || joining) {
+            if (playerIsOpen()) roomAliveAt = Date.now();
+            else if (roomAliveAt && Date.now() - roomAliveAt > ROOM_ORPHAN_MS) {
+                console.log('[LParty] room without player - auto leave');
+                leaveRoom(true);
+            }
+        }
+
         if (!inRoom) {
             $('.lparty-room-badge').remove();
             return;
@@ -1479,7 +1585,7 @@
 
         Lampa.SettingsApi.addParam({
             component: 'lparty',
-            param: { name: 'lparty_display_name', type: 'input', values: '', default: '' },
+            param: { name: 'lparty_display_name', type: 'input', values: '', default: '', placeholder: pid },
             field: { name: T.param_name, description: T.param_name_descr }
         });
 
@@ -1504,7 +1610,7 @@
 
         Lampa.SettingsApi.addParam({
             component: 'lparty',
-            param: { name: 'lparty_default_password', type: 'input', values: '', default: '' },
+            param: { name: 'lparty_default_password', type: 'input', values: '', default: '', placeholder: '' },
             field: { name: T.param_pwd, description: T.param_pwd_descr },
             onRender: function (item) {
                 passwordParamItem = item;
@@ -1514,19 +1620,24 @@
 
         Lampa.SettingsApi.addParam({
             component: 'lparty',
-            param: { name: 'lparty_relay', type: 'input', values: '', default: DEFAULT_RELAY },
+            param: { name: 'lparty_relay', type: 'input', values: '', default: DEFAULT_RELAY, placeholder: DEFAULT_RELAY },
             field: { name: T.param_relay, description: T.param_relay_descr }
         });
     }
 
-    Lampa.Listener.follow('app', function (e) {
-        if (e.type !== 'ready' || window.LParty_head_added) return;
+    function addHeadIcon() {
+        if (window.LParty_head_added) return;
         if (!Lampa.Head || typeof Lampa.Head.addIcon !== 'function') return;
         window.LParty_head_added = true;
 
         var svg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="6"></circle><path d="M10.5 9.5 L10.5 14.5 L15 12 Z" fill="currentColor" stroke="none"></path><circle cx="4" cy="4" r="1.8" fill="currentColor" stroke="none"></circle><circle cx="20" cy="4" r="1.8" fill="currentColor" stroke="none"></circle><circle cx="4" cy="20" r="1.8" fill="currentColor" stroke="none"></circle><circle cx="20" cy="20" r="1.8" fill="currentColor" stroke="none"></circle></svg>';
         var btn = Lampa.Head.addIcon(svg, openRoomBrowser);
         if (btn && btn.attr) btn.attr('title', T.menu_title);
+    }
+
+    if (window.appready) addHeadIcon();
+    else Lampa.Listener.follow('app', function (e) {
+        if (e.type === 'ready') addHeadIcon();
     });
 
     Lampa.Listener.follow('full', function (e) {
@@ -1545,8 +1656,12 @@
         lastStreamUrl = e.url;
         lastStreamTitle = (e.movie && (e.movie.title || e.movie.name)) || e.title || '';
 
-        if (episodeSwitchPending && inRoom) {
-            episodeSwitchPending = false;
+        roomAliveAt = Date.now();
+
+        var switching = isEpisodeSwitching();
+        clearEpisodeSwitch();
+
+        if (switching && inRoom) {
             if (iAmHost()) {
                 currentRoomMeta.url = e.url;
                 currentRoomMeta.title = lastStreamTitle;
@@ -1574,14 +1689,18 @@
                 vid._lp_hooked = false;
                 clearRateAdjust(vid);
             }
-            if (episodeSwitchPending) return;
+
+            if (!inRoom && !joining) return;
+
+            if (isEpisodeSwitching()) return;
+
             leaveRoom(true);
         });
     }
 
     if (typeof Lampa.PlayerPlaylist !== 'undefined' && Lampa.PlayerPlaylist.listener && Lampa.PlayerPlaylist.listener.follow) {
         Lampa.PlayerPlaylist.listener.follow('select', function () {
-            if (inRoom && iAmHost()) episodeSwitchPending = true;
+            if (inRoom && iAmHost()) markEpisodeSwitch();
         });
     }
 
@@ -1590,6 +1709,8 @@
     });
 
     function createRoomFromPlayer() {
+        dropStaleRoom();
+
         if (inRoom) {
             Lampa.Noty.show(T.already_in_room(currentRoomName || currentRoomId || ''));
             return;
@@ -1598,12 +1719,11 @@
             Lampa.Noty.show(T.need_url);
             return;
         }
-        try {
-            if (typeof Lampa.Controller !== 'undefined' && Lampa.Controller.toggle) {
-                var isMobile = Lampa.Platform && Lampa.Platform.screen && Lampa.Platform.screen('mobile');
-                Lampa.Controller.toggle(isMobile ? 'player' : 'player_panel');
-            }
-        } catch (err) {}
+
+        var isMobile = Lampa.Platform && Lampa.Platform.screen && Lampa.Platform.screen('mobile');
+        uiPrevController = isMobile ? 'player' : 'player_panel';
+        restoreController();
+
         autoCreateRoomFromPending(lastViewedCard || {}, lastStreamUrl);
     }
 
