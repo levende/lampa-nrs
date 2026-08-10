@@ -9,7 +9,7 @@
 
     var META = {
         name: 'LParty',
-        version: '1.2.0',
+        version: '1.3.0',
         author: 'nrsua'
     };
 
@@ -210,6 +210,21 @@
     var HOLD_MAX_MS = 25000;
     var HOLD_BUFFER_S = 6;
     var PENDING_SHARE_MS = 300000;
+    var HARD_SEEK_COOLDOWN_MS = 3000;
+    var RECONNECT_HELLO_MS = 60000;
+    var LOG_LIMIT = 400;
+
+    var logRing = [];
+
+    function lplog() {
+        var text = Array.prototype.slice.call(arguments).join(' ');
+        var stamp = new Date().toISOString().substr(11, 12);
+
+        logRing.push(stamp + '  ' + text);
+        if (logRing.length > LOG_LIMIT) logRing.shift();
+
+        return text;
+    }
 
     var pid = Lampa.Storage.get('lampac_unic_id', '');
     if (!pid) {
@@ -405,6 +420,7 @@
             }
 
             self.ws.onopen = function () {
+                lplog('ws open', self.channel);
                 self.onEvent({ kind: 'open' });
             };
 
@@ -457,6 +473,7 @@
             };
 
             self.ws.onclose = function () {
+                lplog('ws close', self.channel, self.closed ? '(by us)' : '(remote)');
                 self.uid = null;
                 self.members = [];
                 self.onEvent({ kind: 'close' });
@@ -535,6 +552,8 @@
     var isSystemSyncing = false;
     var lastUserActionTime = 0;
     var rewindUntil = 0;
+    var lastHardSeekAt = 0;
+    var knownPids = {};
 
     var holdActive = false;
     var holdPosition = 0;
@@ -612,7 +631,7 @@
             for (var key in echoPending) {
                 if (!echoPending.hasOwnProperty(key)) continue;
                 if (now - echoPending[key] > ECHO_TIMEOUT_MS) {
-                    console.log('[LParty] echo watchdog timeout - forcing reconnect');
+                    console.log('[LParty]', lplog('echo watchdog timeout - forcing reconnect'));
                     echoPending = {};
                     try { room.ws.close(); } catch (err) {}
                     return;
@@ -818,8 +837,10 @@
         currentRoomOwner = null;
         currentRoomMeta = { title: '', poster: '', url: '', tmdb_id: 0, source: '', type: '' };
         pidByUid = {};
+        knownPids = {};
         echoPending = {};
         pingSamples = [];
+        lastHardSeekAt = 0;
         clearEpisodeSwitch();
         roomAliveAt = 0;
 
@@ -830,7 +851,7 @@
 
     function dropStaleRoom() {
         if ((inRoom || joining) && !playerIsOpen()) {
-            console.log('[LParty] stale room detected (player closed) - leaving');
+            console.log('[LParty]', lplog('stale room detected (player closed) - leaving'));
             leaveRoom(true);
             return true;
         }
@@ -838,6 +859,7 @@
     }
 
     function leaveRoom(sendBye) {
+        if (inRoom || joining) lplog('leave room', currentRoomId || '');
         if (room) {
             if (sendBye && room.alive()) roomSend({ t: 'bye' });
             room.close();
@@ -1134,7 +1156,13 @@
             if (!inRoom) return;
             Lampa.Noty.show(T.notice_joined(m.n || e.alias));
 
-            if (iAmHost()) startJoinHold(m.u);
+            var seenAt = m.u ? knownPids[m.u] : 0;
+            var reconnected = seenAt && (Date.now() - seenAt) < RECONNECT_HELLO_MS;
+            if (m.u) knownPids[m.u] = Date.now();
+
+            lplog('hello from', m.u, reconnected ? '(reconnect)' : '(new)');
+
+            if (iAmHost() && !reconnected) startJoinHold(m.u);
 
             setTimeout(function () {
                 if (!inRoom) return;
@@ -1200,6 +1228,8 @@
         if (m.t === 'sync' || m.t === 'act') {
             if (!inRoom) return;
 
+            if (m.t === 'sync' && (iAmHost() || (currentRoomOwner && m.u !== currentRoomOwner))) return;
+
             if (m.t === 'act' && m.v) {
                 var text = formatNotice(m.v, m.n || e.alias);
                 if (text) Lampa.Noty.show(text);
@@ -1217,11 +1247,7 @@
             if (!vid) return;
 
             if (isRewinding() || holdActive) return;
-
-            if (Date.now() - lastUserActionTime < 2000) {
-                sendSync(vid.paused ? 'paused' : 'playing', null);
-                return;
-            }
+            if (Date.now() - lastUserActionTime < 2000) return;
 
             isSystemSyncing = true;
             applySync(vid, state, position, e.date);
@@ -1371,6 +1397,7 @@
             }
 
             Lampa.Noty.show(T.notice_hold);
+            lplog('hold start at', holdPosition.toFixed(2));
         }
 
         if (newcomerPid && newcomerPid !== pid) holdWaiting[newcomerPid] = true;
@@ -1404,6 +1431,7 @@
 
         var position = holdPosition;
 
+        lplog('hold finish at', position.toFixed(2));
         roomSend({ t: 'go', p: position });
         releaseHold(position);
     }
@@ -1522,38 +1550,58 @@
         if (vid.playbackRate !== 1) vid.playbackRate = 1;
     }
 
+    function videoBusy(vid) {
+        return !!vid._lp_buffering || vid.readyState < 3;
+    }
+
     function applySync(vid, state, basePosition, atServerTime) {
         if (vid.currentTime === undefined) return;
 
-        var expected = expectedPositionNow(state, basePosition, atServerTime);
-        var diff = vid.currentTime - expected;
-        var absDiff = Math.abs(diff);
+        var busy = videoBusy(vid);
 
-        if (absDiff > SYNC_HARD_SEEK_S) {
-            setExpectedSeek(expected);
-            vid.currentTime = expected;
+        if (busy) {
             clearRateAdjust(vid);
-        } else if (absDiff > SYNC_TOLERANCE_S) {
-            var raw = diff * SYNC_RATE_GAIN;
-            var offset = Math.max(-SYNC_MAX_RATE_OFFSET, Math.min(SYNC_MAX_RATE_OFFSET, raw));
-            var newRate = 1 - offset;
-            if (Math.abs(vid.playbackRate - newRate) > 0.005) vid.playbackRate = newRate;
-            if (vid._lp_rate_timeout) clearTimeout(vid._lp_rate_timeout);
-            vid._lp_rate_timeout = setTimeout(function () {
-                vid._lp_rate_timeout = null;
-                if (vid.playbackRate !== 1) vid.playbackRate = 1;
-            }, SYNC_RATE_RESET_MS);
         } else {
-            clearRateAdjust(vid);
+            var expected = expectedPositionNow(state, basePosition, atServerTime);
+            var diff = vid.currentTime - expected;
+            var absDiff = Math.abs(diff);
+
+            if (absDiff > SYNC_HARD_SEEK_S) {
+                clearRateAdjust(vid);
+
+                if (Date.now() - lastHardSeekAt > HARD_SEEK_COOLDOWN_MS) {
+                    lastHardSeekAt = Date.now();
+                    lplog('hard seek', vid.currentTime.toFixed(2), '->', expected.toFixed(2));
+                    setExpectedSeek(expected);
+                    vid.currentTime = expected;
+                } else {
+                    lplog('hard seek skipped (cooldown), drift', absDiff.toFixed(2));
+                }
+            } else if (absDiff > SYNC_TOLERANCE_S) {
+                var raw = diff * SYNC_RATE_GAIN;
+                var offset = Math.max(-SYNC_MAX_RATE_OFFSET, Math.min(SYNC_MAX_RATE_OFFSET, raw));
+                var newRate = 1 - offset;
+                if (Math.abs(vid.playbackRate - newRate) > 0.005) vid.playbackRate = newRate;
+                if (vid._lp_rate_timeout) clearTimeout(vid._lp_rate_timeout);
+                vid._lp_rate_timeout = setTimeout(function () {
+                    vid._lp_rate_timeout = null;
+                    if (vid.playbackRate !== 1) vid.playbackRate = 1;
+                }, SYNC_RATE_RESET_MS);
+            } else {
+                clearRateAdjust(vid);
+            }
         }
 
-        if (state === 'playing' && vid.paused) {
-            expectPlay();
-            playVideo(vid, function () { expectedState.play = false; });
-        } else if (state === 'paused' && !vid.paused) {
+        if (state === 'paused' && !vid.paused) {
             expectPause();
             if (vid.playbackRate !== 1) vid.playbackRate = 1;
             pauseVideo(vid);
+            return;
+        }
+
+        if (state === 'playing' && vid.paused && !busy) {
+            expectPlay();
+            playVideo(vid, function () { expectedState.play = false; });
         }
     }
 
@@ -1561,7 +1609,7 @@
         if (inRoom || joining) {
             if (playerIsOpen()) roomAliveAt = Date.now();
             else if (roomAliveAt && Date.now() - roomAliveAt > ROOM_ORPHAN_MS) {
-                console.log('[LParty] room without player - auto leave');
+                console.log('[LParty]', lplog('room without player - auto leave'));
                 leaveRoom(true);
             }
         }
@@ -1607,9 +1655,22 @@
         else vid.addEventListener('loadedmetadata', enforceInitial);
         vid.addEventListener('canplay', enforceInitial);
 
-        vid.addEventListener('waiting', function () { vid._lp_buffering = true; });
-        vid.addEventListener('canplay', function () { vid._lp_buffering = false; });
-        vid.addEventListener('playing', function () { vid._lp_buffering = false; });
+        vid.addEventListener('waiting', function () {
+            vid._lp_buffering = true;
+            lplog('buffering start at', (vid.currentTime || 0).toFixed(2));
+        });
+        vid.addEventListener('canplay', function () {
+            if (vid._lp_buffering) lplog('buffering end at', (vid.currentTime || 0).toFixed(2));
+            vid._lp_buffering = false;
+        });
+        vid.addEventListener('playing', function () {
+            if (vid._lp_buffering) lplog('buffering end at', (vid.currentTime || 0).toFixed(2));
+            vid._lp_buffering = false;
+        });
+        vid.addEventListener('error', function () {
+            lplog('video error', vid.error ? ('code ' + vid.error.code) : '');
+        });
+        vid.addEventListener('stalled', function () { lplog('video stalled'); });
 
         vid.addEventListener('play', function () {
             if (initialSyncLock) {
@@ -1669,11 +1730,12 @@
     }, 1000);
 
     setInterval(function () {
-        if (!inRoom || initialSyncLock || isSystemSyncing) return;
+        if (!inRoom || initialSyncLock || isSystemSyncing || holdActive) return;
+        if (!iAmHost()) return;
         if (expectedState.seek !== -1) return;
         var vid = getVideo();
-        if (!vid || vid.paused) return;
-        sendSync('playing', null);
+        if (!vid) return;
+        sendSync(vid.paused ? 'paused' : 'playing', null);
     }, SYNC_HEARTBEAT_MS);
 
     var debugRefreshTimer = null;
@@ -1986,6 +2048,40 @@
         });
     }
 
+    window.LParty = {
+        version: META.version,
+        log: function () { return logRing.join('\n'); },
+        dump: function () { console.log(logRing.join('\n')); return logRing.length; },
+        state: function () {
+            var vid = getVideo();
+            return {
+                room: currentRoomId,
+                name: currentRoomName,
+                host: iAmHost(),
+                owner: currentRoomOwner,
+                inRoom: inRoom,
+                joining: joining,
+                members: memberCount(),
+                relay: room && room.ws ? room.ws.readyState : null,
+                lobby: !!(lobbyHost && lobbyHost.alive()),
+                hold: holdActive,
+                holdPosition: holdPosition,
+                holdWaiting: Object.keys(holdWaiting),
+                initialSyncLock: initialSyncLock,
+                clockOffset: Math.round(serverTimeOffset),
+                echoPending: Object.keys(echoPending).length,
+                video: vid ? {
+                    position: vid.currentTime,
+                    paused: vid.paused,
+                    rate: vid.playbackRate,
+                    readyState: vid.readyState,
+                    buffering: !!vid._lp_buffering
+                } : null
+            };
+        },
+        leave: function () { leaveRoom(true); return 'left'; }
+    };
+
     registerSettings();
-    console.log('[LParty] started, relay:', getRelay(), 'lang:', _rawLang);
+    console.log('[LParty]', lplog('started, relay: ' + getRelay() + ', lang: ' + _rawLang));
 })();
