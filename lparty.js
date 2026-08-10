@@ -9,7 +9,7 @@
 
     var META = {
         name: 'LParty',
-        version: '1.3.0',
+        version: '1.3.1',
         author: 'nrsua'
     };
 
@@ -215,6 +215,7 @@
     var NO_RANGES = -2;
     var OUT_OF_RANGE = -1;
     var PENDING_SHARE_MS = 300000;
+    var SHARE_START_DELAY_MS = 600;
     var HARD_SEEK_COOLDOWN_MS = 3000;
     var RECONNECT_HELLO_MS = 60000;
     var LOG_LIMIT = 400;
@@ -280,10 +281,19 @@
 
     function restoreController(name) {
         var target = name || uiPrevController || 'content';
+
+        if (target === 'content' && playerIsOpen()) target = 'player';
+
         try {
             Lampa.Controller.toggle(target);
             if (controllerName() === target) return;
         } catch (err) {}
+
+        if (playerIsOpen()) {
+            try { Lampa.Controller.toggle('player'); } catch (err) {}
+            if (controllerName() === 'player') return;
+        }
+
         try { Lampa.Controller.toggle('content'); } catch (err) {}
     }
 
@@ -1061,10 +1071,13 @@
             Lampa.Noty.show(T.create_ok(currentRoomName));
             setTimeout(function () { Lampa.Noty.show(T.room_code(id)); }, 1200);
 
-            if (hostAlreadyPlaying) {
-                var vid = getVideo();
-                if (vid) roomSend({ t: 'sync', s: vid.paused ? 'paused' : 'playing', p: vid.currentTime || 0 });
+            var vid = getVideo();
+
+            if (hostAlreadyPlaying && playerIsOpen() && vid) {
+                roomSend({ t: 'sync', s: vid.paused ? 'paused' : 'playing', p: vid.currentTime || 0 });
             } else {
+                if (hostAlreadyPlaying) lplog('player was expected open but is not - starting it');
+
                 closeSettings();
 
                 Lampa.Player.play({
@@ -1988,10 +2001,20 @@
 
         if (pendingShareCard) {
             var card = pendingShareCard;
+            var url = e.url;
             var fresh = Date.now() - pendingShareAt < PENDING_SHARE_MS;
+
             pendingShareCard = null;
             pendingShareAt = 0;
-            if (fresh) autoCreateRoomFromPending(card, e.url);
+
+            if (fresh) {
+                uiPrevController = 'player';
+
+                setTimeout(function () {
+                    lplog('auto create room from card menu');
+                    autoCreateRoomFromPending(card, url);
+                }, SHARE_START_DELAY_MS);
+            }
         }
     }
 
