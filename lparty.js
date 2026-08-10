@@ -10,7 +10,7 @@
     var META = {
         name: 'LParty',
         version: '1.3.3',
-        author: 'nrsua'
+        author: 'nrsua, levende'
     };
 
     var _rawLang = (Lampa.Storage.get('language') || 'en').toLowerCase();
