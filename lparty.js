@@ -202,7 +202,7 @@
     var LOBBY_COLLECT_MS = 1500;
     var JOIN_TIMEOUT_MS = 6000;
     var JOIN_EMPTY_TIMEOUT_MS = 2500;
-    var PING_INTERVAL_MS = 20000;
+    var PING_INTERVAL_MS = 8000;
     var ECHO_TIMEOUT_MS = 30000;
     var RECONNECT_MS = 4000;
 
@@ -211,7 +211,12 @@
 
     var SYNC_HEARTBEAT_MS = 2000;
     var SYNC_TOLERANCE_S = 0.30;
+    var SYNC_CORRECT_ON_S = 0.70;
     var SYNC_HARD_SEEK_S = 1.50;
+    var SYNC_HARD_SEEK_APPLE_S = 3.00;
+    var SEEK_GUARD_MS = 4000;
+    var SEEK_BROADCAST_MIN_MS = 2000;
+    var SEEK_MIN_JUMP_S = 1.00;
     var SYNC_RATE_GAIN = 0.10;
     var SYNC_MAX_RATE_OFFSET = 0.10;
     var SYNC_RATE_RESET_MS = 4000;
@@ -1607,19 +1612,29 @@
     }
 
     var expectedSeekTimer = null;
+    var seekGuardUntil = 0;
+    var lastSeekBroadcastAt = 0;
+    var lastKnownPosition = 0;
 
     function setExpectedSeek(pos) {
         expectedState.seek = pos;
+        seekGuardUntil = Date.now() + SEEK_GUARD_MS;
+
         if (expectedSeekTimer) clearTimeout(expectedSeekTimer);
         expectedSeekTimer = setTimeout(function () {
             expectedSeekTimer = null;
             expectedState.seek = -1;
-        }, 4000);
+        }, SEEK_GUARD_MS);
     }
 
     function clearExpectedSeek() {
         if (expectedSeekTimer) { clearTimeout(expectedSeekTimer); expectedSeekTimer = null; }
         expectedState.seek = -1;
+        seekGuardUntil = 0;
+    }
+
+    function seekIsOurs() {
+        return Date.now() < seekGuardUntil;
     }
 
     function isRewinding() {
@@ -1645,11 +1660,29 @@
 
     function clearRateAdjust(vid) {
         if (vid._lp_rate_timeout) { clearTimeout(vid._lp_rate_timeout); vid._lp_rate_timeout = null; }
+        vid._lp_correcting = false;
+        if (!canAdjustRate()) return;
         if (vid.playbackRate !== 1) vid.playbackRate = 1;
     }
 
     function videoBusy(vid) {
         return !!vid._lp_buffering || vid.readyState < 3;
+    }
+
+    var appleNative = (function () {
+        try {
+            return !!(Lampa.Platform && (Lampa.Platform.is('apple') || Lampa.Platform.is('apple_tv')));
+        } catch (err) {
+            return false;
+        }
+    })();
+
+    function canAdjustRate() {
+        return !appleNative;
+    }
+
+    function hardSeekThreshold() {
+        return appleNative ? SYNC_HARD_SEEK_APPLE_S : SYNC_HARD_SEEK_S;
     }
 
     function applySync(vid, state, basePosition, atServerTime) {
@@ -1664,8 +1697,9 @@
             var diff = vid.currentTime - expected;
             var absDiff = Math.abs(diff);
 
-            if (absDiff > SYNC_HARD_SEEK_S) {
+            if (absDiff > hardSeekThreshold()) {
                 clearRateAdjust(vid);
+                vid._lp_correcting = false;
 
                 if (Date.now() - lastHardSeekAt > HARD_SEEK_COOLDOWN_MS) {
                     lastHardSeekAt = Date.now();
@@ -1675,7 +1709,9 @@
                 } else {
                     lplog('hard seek skipped (cooldown), drift', absDiff.toFixed(2));
                 }
-            } else if (absDiff > SYNC_TOLERANCE_S) {
+            } else if (canAdjustRate() && (vid._lp_correcting ? absDiff > SYNC_TOLERANCE_S : absDiff > SYNC_CORRECT_ON_S)) {
+                vid._lp_correcting = true;
+
                 var raw = diff * SYNC_RATE_GAIN;
                 var offset = Math.max(-SYNC_MAX_RATE_OFFSET, Math.min(SYNC_MAX_RATE_OFFSET, raw));
                 var newRate = 1 - offset;
@@ -1683,16 +1719,18 @@
                 if (vid._lp_rate_timeout) clearTimeout(vid._lp_rate_timeout);
                 vid._lp_rate_timeout = setTimeout(function () {
                     vid._lp_rate_timeout = null;
+                    vid._lp_correcting = false;
                     if (vid.playbackRate !== 1) vid.playbackRate = 1;
                 }, SYNC_RATE_RESET_MS);
             } else {
+                vid._lp_correcting = false;
                 clearRateAdjust(vid);
             }
         }
 
         if (state === 'paused' && !vid.paused) {
             expectPause();
-            if (vid.playbackRate !== 1) vid.playbackRate = 1;
+            clearRateAdjust(vid);
             pauseVideo(vid);
             return;
         }
@@ -1720,6 +1758,8 @@
         if (!vid) return;
         updateRoomBadge();
         holdTick();
+
+        if (!seekIsOurs()) lastKnownPosition = vid.currentTime || 0;
 
         if (vid._lp_hooked) return;
         vid._lp_hooked = true;
@@ -1802,8 +1842,7 @@
         });
 
         vid.addEventListener('pause', function () {
-            if (vid._lp_rate_timeout) { clearTimeout(vid._lp_rate_timeout); vid._lp_rate_timeout = null; }
-            vid.playbackRate = 1;
+            clearRateAdjust(vid);
             if (initialSyncLock) return;
             var wasExpected = expectedState.pause;
             expectedState.pause = false;
@@ -1816,10 +1855,7 @@
         });
 
         vid.addEventListener('seeked', function () {
-            if (!isSystemSyncing) {
-                if (vid._lp_rate_timeout) { clearTimeout(vid._lp_rate_timeout); vid._lp_rate_timeout = null; }
-                vid.playbackRate = 1;
-            }
+            if (!isSystemSyncing) clearRateAdjust(vid);
             if (initialSyncLock) {
                 if (targetInitialState) {
                     var expected = expectedPositionNow(targetInitialState.state, targetInitialState.position, targetInitialState.atServerTime);
@@ -1831,12 +1867,29 @@
                 return;
             }
             if (isSystemSyncing) return;
-            if (expectedState.seek !== -1) {
-                var wasExpectedSeek = Math.abs(vid.currentTime - expectedState.seek) < 1.5;
+
+            if (seekIsOurs()) {
+                lplog('own seek settled at', (vid.currentTime || 0).toFixed(2));
                 clearExpectedSeek();
-                if (wasExpectedSeek) return;
+                lastKnownPosition = vid.currentTime || 0;
+                return;
             }
+
+            if (expectedState.seek !== -1) clearExpectedSeek();
+
+            if (Math.abs((vid.currentTime || 0) - lastKnownPosition) < SEEK_MIN_JUMP_S) {
+                lplog('seek ignored, position barely moved', (vid.currentTime || 0).toFixed(2));
+                return;
+            }
+
+            if (Date.now() - lastSeekBroadcastAt < SEEK_BROADCAST_MIN_MS) {
+                lplog('seek broadcast throttled at', (vid.currentTime || 0).toFixed(2));
+                return;
+            }
+
             if (isRewinding()) rewindUntil = Date.now() + 400;
+            lastSeekBroadcastAt = Date.now();
+            lastKnownPosition = vid.currentTime || 0;
             lastUserActionTime = Date.now();
             sendSync(vid.paused ? 'paused' : 'playing', 'seeked');
         });
@@ -1944,7 +1997,7 @@
             param: { name: 'lparty_meta', type: 'static' },
             field: {
                 name: META.name + ' v' + META.version,
-                description: 'Author: ' + META.author
+                description: 'Authors: ' + META.author
             },
             onRender: function (item) {
                 item.on('hover:enter', function () {});
