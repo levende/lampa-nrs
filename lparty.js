@@ -9,7 +9,7 @@
 
     var META = {
         name: 'LParty',
-        version: '1.1.0',
+        version: '1.2.0',
         author: 'nrsua'
     };
 
@@ -67,7 +67,9 @@
             player_create_descr: 'Створити кімнату на цей потік',
             already_in_room: function (n) { return 'Ви вже в кімнаті "' + n + '"'; },
             leave_btn: 'Покинути кімнату',
-            left_ok: 'Ви покинули кімнату'
+            left_ok: 'Ви покинули кімнату',
+            notice_hold: 'Пауза - чекаємо, поки всі завантажать буфер',
+            notice_go: 'Усі готові - продовжуємо'
         },
         en: {
             menu_title: 'LParty',
@@ -121,7 +123,9 @@
             player_create_descr: 'Create a room for this stream',
             already_in_room: function (n) { return 'You are already in room "' + n + '"'; },
             leave_btn: 'Leave room',
-            left_ok: 'You left the room'
+            left_ok: 'You left the room',
+            notice_hold: 'Paused - waiting for everyone to buffer',
+            notice_go: 'Everyone is ready - resuming'
         },
         ru: {
             menu_title: 'LParty',
@@ -175,7 +179,9 @@
             player_create_descr: 'Создать комнату с этим потоком',
             already_in_room: function (n) { return 'Вы уже в комнате "' + n + '"'; },
             leave_btn: 'Покинуть комнату',
-            left_ok: 'Вы покинули комнату'
+            left_ok: 'Вы покинули комнату',
+            notice_hold: 'Пауза - ждём, пока все загрузят буфер',
+            notice_go: 'Все готовы - продолжаем'
         }
     };
     var T = i18n[_rawLang] || i18n['en'];
@@ -199,6 +205,11 @@
     var SYNC_RATE_GAIN = 0.10;
     var SYNC_MAX_RATE_OFFSET = 0.10;
     var SYNC_RATE_RESET_MS = 4000;
+    var REWIND_GRACE_MS = 2500;
+
+    var HOLD_MAX_MS = 25000;
+    var HOLD_BUFFER_S = 6;
+    var PENDING_SHARE_MS = 300000;
 
     var pid = Lampa.Storage.get('lampac_unic_id', '');
     if (!pid) {
@@ -408,8 +419,9 @@
                         self.members = [];
                         var list = d.users || [];
                         for (var i = 0; i < list.length; i++) {
-                            self.members.push({ uid: list[i].uid, alias: list[i].alias || '' });
+                            if (!self.findMember(list[i].uid)) self.members.push({ uid: list[i].uid, alias: list[i].alias || '' });
                         }
+                        if (!self.findMember(self.uid)) self.members.push({ uid: self.uid, alias: self.alias });
                         self.onEvent({ kind: 'ready', date: d.date, total: d.total, members: self.members });
                     } else {
                         if (!self.findMember(d.uid)) self.members.push({ uid: d.uid, alias: d.alias || '' });
@@ -522,6 +534,13 @@
 
     var isSystemSyncing = false;
     var lastUserActionTime = 0;
+    var rewindUntil = 0;
+
+    var holdActive = false;
+    var holdPosition = 0;
+    var holdWaiting = {};
+    var holdReadySent = false;
+    var holdTimer = null;
     var initialSyncLock = false;
     var targetInitialState = null;
     var expectedState = { seek: -1, play: false, pause: false };
@@ -529,6 +548,7 @@
     var lastStreamUrl = null;
     var lastStreamTitle = null;
     var pendingShareCard = null;
+    var pendingShareAt = 0;
     var lastViewedCard = null;
 
     function serverNow() { return Date.now() + serverTimeOffset; }
@@ -784,6 +804,12 @@
         initialSyncLock = false;
         targetInitialState = null;
         isSystemSyncing = false;
+        rewindUntil = 0;
+        holdActive = false;
+        holdPosition = 0;
+        holdWaiting = {};
+        holdReadySent = false;
+        if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
         inRoom = false;
         joining = false;
         currentRoomId = null;
@@ -1107,12 +1133,34 @@
         if (m.t === 'hello') {
             if (!inRoom) return;
             Lampa.Noty.show(T.notice_joined(m.n || e.alias));
+
+            if (iAmHost()) startJoinHold(m.u);
+
             setTimeout(function () {
                 if (!inRoom) return;
                 roomSend({ t: 'me', n: getDisplayName() });
                 if (iAmHost()) sendHostState();
             }, Math.floor(Math.random() * 250) + 50);
             updateRoomBadge();
+            return;
+        }
+
+        if (m.t === 'hold') {
+            if (!inRoom && !joining) return;
+            if (currentRoomOwner && m.u !== currentRoomOwner) return;
+            applyHold(m.p || 0);
+            return;
+        }
+
+        if (m.t === 'ready') {
+            markHoldReady(m.u);
+            return;
+        }
+
+        if (m.t === 'go') {
+            if (!inRoom && !joining) return;
+            if (currentRoomOwner && m.u !== currentRoomOwner) return;
+            releaseHold(typeof m.p === 'number' ? m.p : holdPosition);
             return;
         }
 
@@ -1167,6 +1215,8 @@
 
             var vid = getVideo();
             if (!vid) return;
+
+            if (isRewinding() || holdActive) return;
 
             if (Date.now() - lastUserActionTime < 2000) {
                 sendSync(vid.paused ? 'paused' : 'playing', null);
@@ -1224,18 +1274,22 @@
         Lampa.Noty.show(T.notice_left(e.alias || ''));
         updateRoomBadge();
 
+        if (leaverPid && holdWaiting[leaverPid]) markHoldReady(leaverPid);
+
         var hostGone = currentRoomOwner && leaverPid === currentRoomOwner;
         if (!hostGone) return;
 
         setTimeout(function () {
-            if (!inRoom || !room) return;
+            if (!inRoom || !room || !room.uid) return;
             if (hostStillPresent()) return;
 
-            var uids = [];
-            for (var i = 0; i < room.members.length; i++) uids.push(room.members[i].uid);
+            var uids = [room.uid];
+            for (var i = 0; i < room.members.length; i++) {
+                if (room.members[i].uid !== room.uid) uids.push(room.members[i].uid);
+            }
             uids.sort();
 
-            if (uids.length && uids[0] === room.uid) {
+            if (uids[0] === room.uid) {
                 currentRoomOwner = pid;
                 roomSend({ t: 'host', n: getDisplayName() });
                 Lampa.Noty.show(T.notice_host_changed(getDisplayName()));
@@ -1272,8 +1326,150 @@
         return vid;
     }
 
+    function pauseVideo(vid) {
+        if (typeof Lampa.PlayerVideo !== 'undefined' && Lampa.PlayerVideo.pause) Lampa.PlayerVideo.pause();
+        else if (vid) vid.pause();
+    }
+
+    function playVideo(vid, onFail) {
+        if (typeof Lampa.PlayerVideo !== 'undefined' && Lampa.PlayerVideo.play) return Lampa.PlayerVideo.play();
+        if (!vid) return;
+        var p = vid.play();
+        if (p && p['catch']) p['catch'](function () { if (onFail) onFail(); });
+    }
+
+    function bufferReady(vid, position) {
+        if (!vid) return false;
+        if (vid.readyState >= 4) return true;
+
+        try {
+            var ranges = vid.buffered;
+            for (var i = 0; i < ranges.length; i++) {
+                if (position >= ranges.start(i) - 1 && position <= ranges.end(i)) {
+                    return (ranges.end(i) - position) >= HOLD_BUFFER_S;
+                }
+            }
+        } catch (err) {}
+
+        return false;
+    }
+
+    function startJoinHold(newcomerPid) {
+        if (!inRoom || !iAmHost()) return;
+
+        var vid = getVideo();
+
+        if (!holdActive) {
+            holdActive = true;
+            holdPosition = vid ? (vid.currentTime || 0) : 0;
+            holdWaiting = {};
+            holdReadySent = false;
+
+            if (vid && !vid.paused) {
+                expectPause();
+                pauseVideo(vid);
+            }
+
+            Lampa.Noty.show(T.notice_hold);
+        }
+
+        if (newcomerPid && newcomerPid !== pid) holdWaiting[newcomerPid] = true;
+
+        roomSend({ t: 'hold', p: holdPosition });
+
+        if (holdTimer) clearTimeout(holdTimer);
+        holdTimer = setTimeout(finishHold, HOLD_MAX_MS);
+    }
+
+    function markHoldReady(fromPid) {
+        if (!holdActive || !iAmHost()) return;
+        if (fromPid) delete holdWaiting[fromPid];
+        checkHoldDone();
+    }
+
+    function checkHoldDone() {
+        if (!holdActive || !iAmHost()) return;
+
+        for (var key in holdWaiting) {
+            if (holdWaiting.hasOwnProperty(key)) return;
+        }
+
+        if (!bufferReady(getVideo(), holdPosition)) return;
+
+        finishHold();
+    }
+
+    function finishHold() {
+        if (!holdActive) return;
+
+        var position = holdPosition;
+
+        roomSend({ t: 'go', p: position });
+        releaseHold(position);
+    }
+
+    function releaseHold(position) {
+        var wasHolding = holdActive;
+
+        holdActive = false;
+        holdWaiting = {};
+        holdReadySent = false;
+        if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+
+        initialSyncLock = false;
+        targetInitialState = null;
+
+        if (wasHolding) Lampa.Noty.show(T.notice_go);
+
+        var vid = getVideo();
+        if (!vid) return;
+
+        if (typeof position === 'number' && Math.abs((vid.currentTime || 0) - position) > 0.5) {
+            setExpectedSeek(position);
+            vid.currentTime = position;
+        }
+
+        if (vid.paused) {
+            expectPlay();
+            playVideo(vid, function () { expectedState.play = false; });
+        }
+    }
+
+    function applyHold(position) {
+        holdActive = true;
+        holdPosition = position || 0;
+        holdReadySent = false;
+
+        Lampa.Noty.show(T.notice_hold);
+
+        var vid = getVideo();
+        if (!vid) return;
+
+        if (!vid.paused) {
+            expectPause();
+            pauseVideo(vid);
+        }
+
+        if (Math.abs((vid.currentTime || 0) - holdPosition) > 1) {
+            setExpectedSeek(holdPosition);
+            vid.currentTime = holdPosition;
+        }
+    }
+
+    function holdTick() {
+        if (!holdActive) return;
+
+        if (iAmHost()) return checkHoldDone();
+
+        if (holdReadySent) return;
+        if (!bufferReady(getVideo(), holdPosition)) return;
+
+        holdReadySent = true;
+        roomSend({ t: 'ready' });
+    }
+
     function sendSync(state, verb) {
-        if (!inRoom || initialSyncLock) return;
+        if (!inRoom || initialSyncLock || holdActive) return;
         var vid = getVideo();
         if (!vid) return;
 
@@ -1298,6 +1494,17 @@
     function clearExpectedSeek() {
         if (expectedSeekTimer) { clearTimeout(expectedSeekTimer); expectedSeekTimer = null; }
         expectedState.seek = -1;
+    }
+
+    function isRewinding() {
+        return Date.now() < rewindUntil;
+    }
+
+    function onUserRewind() {
+        if (!inRoom || initialSyncLock) return;
+        rewindUntil = Date.now() + REWIND_GRACE_MS;
+        lastUserActionTime = Date.now();
+        clearExpectedSeek();
     }
 
     function expectPlay() {
@@ -1342,16 +1549,11 @@
 
         if (state === 'playing' && vid.paused) {
             expectPlay();
-            if (typeof Lampa.PlayerVideo !== 'undefined' && Lampa.PlayerVideo.play) Lampa.PlayerVideo.play();
-            else {
-                var p = vid.play();
-                if (p && p['catch']) p['catch'](function () { expectedState.play = false; });
-            }
+            playVideo(vid, function () { expectedState.play = false; });
         } else if (state === 'paused' && !vid.paused) {
             expectPause();
             if (vid.playbackRate !== 1) vid.playbackRate = 1;
-            if (typeof Lampa.PlayerVideo !== 'undefined' && Lampa.PlayerVideo.pause) Lampa.PlayerVideo.pause();
-            else vid.pause();
+            pauseVideo(vid);
         }
     }
 
@@ -1371,6 +1573,7 @@
         var vid = getVideo();
         if (!vid) return;
         updateRoomBadge();
+        holdTick();
 
         if (vid._lp_hooked) return;
         vid._lp_hooked = true;
@@ -1384,12 +1587,10 @@
             }
             if (targetInitialState.state === 'paused') {
                 expectPause();
-                if (typeof Lampa.PlayerVideo !== 'undefined' && Lampa.PlayerVideo.pause) Lampa.PlayerVideo.pause();
-                else vid.pause();
+                pauseVideo(vid);
             } else {
                 expectPlay();
-                if (typeof Lampa.PlayerVideo !== 'undefined' && Lampa.PlayerVideo.play) Lampa.PlayerVideo.play();
-                else { var p = vid.play(); if (p && p['catch']) p['catch'](function () {}); }
+                playVideo(vid);
             }
             if (!vid._lp_enforce_timeout) {
                 vid._lp_enforce_timeout = setTimeout(function () {
@@ -1413,14 +1614,14 @@
         vid.addEventListener('play', function () {
             if (initialSyncLock) {
                 if (targetInitialState && targetInitialState.state === 'paused') {
-                    if (typeof Lampa.PlayerVideo !== 'undefined' && Lampa.PlayerVideo.pause) Lampa.PlayerVideo.pause();
-                    else vid.pause();
+                    pauseVideo(vid);
                 }
                 return;
             }
             var wasExpected = expectedState.play;
             expectedState.play = false;
             if (wasExpected) return;
+            if (isRewinding()) { lastUserActionTime = Date.now(); return; }
             if (vid._lp_buffer_paused) { vid._lp_buffer_paused = false; return; }
             lastUserActionTime = Date.now();
             sendSync('playing', 'resumed');
@@ -1434,6 +1635,7 @@
             expectedState.pause = false;
             if (wasExpected) return;
 
+            if (isRewinding()) { lastUserActionTime = Date.now(); return; }
             if (vid._lp_buffering || vid.readyState < 3) { vid._lp_buffer_paused = true; return; }
             lastUserActionTime = Date.now();
             sendSync('paused', 'paused');
@@ -1456,13 +1658,11 @@
             }
             if (isSystemSyncing) return;
             if (expectedState.seek !== -1) {
-                if (Math.abs(vid.currentTime - expectedState.seek) < 1) {
-                    clearExpectedSeek();
-                    return;
-                }
-                vid.currentTime = expectedState.seek;
-                return;
+                var wasExpectedSeek = Math.abs(vid.currentTime - expectedState.seek) < 1.5;
+                clearExpectedSeek();
+                if (wasExpectedSeek) return;
             }
+            if (isRewinding()) rewindUntil = Date.now() + 400;
             lastUserActionTime = Date.now();
             sendSync(vid.paused ? 'paused' : 'playing', 'seeked');
         });
@@ -1672,13 +1872,16 @@
 
         if (pendingShareCard) {
             var card = pendingShareCard;
+            var fresh = Date.now() - pendingShareAt < PENDING_SHARE_MS;
             pendingShareCard = null;
-            autoCreateRoomFromPending(card, e.url);
+            pendingShareAt = 0;
+            if (fresh) autoCreateRoomFromPending(card, e.url);
         }
     }
 
     if (typeof Lampa.PlayerVideo !== 'undefined' && Lampa.PlayerVideo.listener) {
         Lampa.PlayerVideo.listener.follow('start', onPlayerStart);
+        Lampa.PlayerVideo.listener.follow('rewind', onUserRewind);
     }
 
     if (typeof Lampa.Player !== 'undefined' && Lampa.Player.listener) {
@@ -1755,6 +1958,7 @@
                 e.active.onSelect = function (a) {
                     if (a && a.lparty_inject) {
                         pendingShareCard = lastViewedCard || {};
+                        pendingShareAt = Date.now();
                         Lampa.Noty.show(T.pending_share);
                     }
                     if (originalOnSelect) originalOnSelect(a);
