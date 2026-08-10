@@ -207,8 +207,13 @@
     var SYNC_RATE_RESET_MS = 4000;
     var REWIND_GRACE_MS = 2500;
 
-    var HOLD_MAX_MS = 25000;
+    var HOLD_MAX_MS = 15000;
     var HOLD_BUFFER_S = 6;
+    var HOLD_MIN_BUFFER_S = 2;
+    var HOLD_STALL_MS = 3000;
+    var HOLD_NUDGE_MS = 4000;
+    var NO_RANGES = -2;
+    var OUT_OF_RANGE = -1;
     var PENDING_SHARE_MS = 300000;
     var HARD_SEEK_COOLDOWN_MS = 3000;
     var RECONNECT_HELLO_MS = 60000;
@@ -560,6 +565,9 @@
     var holdWaiting = {};
     var holdReadySent = false;
     var holdTimer = null;
+    var holdBufferSeen = -1;
+    var holdBufferAt = 0;
+    var holdNudgeDone = false;
     var initialSyncLock = false;
     var targetInitialState = null;
     var expectedState = { seek: -1, play: false, pause: false };
@@ -595,11 +603,11 @@
     }
 
     function roomSend(obj) {
-        if (!room || !room.alive()) return;
+        if (!room || !room.alive()) return false;
         obj.u = pid;
         obj.k = ++echoSeq;
         echoPending[obj.k] = Date.now();
-        room.send(obj);
+        return room.send(obj);
     }
 
     function handleEcho(key, serverDate) {
@@ -828,6 +836,7 @@
         holdPosition = 0;
         holdWaiting = {};
         holdReadySent = false;
+        resetHoldProgress();
         if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
         inRoom = false;
         joining = false;
@@ -1364,20 +1373,58 @@
         if (p && p['catch']) p['catch'](function () { if (onFail) onFail(); });
     }
 
-    function bufferReady(vid, position) {
-        if (!vid) return false;
-        if (vid.readyState >= 4) return true;
+    function bufferedAhead(vid, position) {
+        var ranges;
 
-        try {
-            var ranges = vid.buffered;
-            for (var i = 0; i < ranges.length; i++) {
-                if (position >= ranges.start(i) - 1 && position <= ranges.end(i)) {
-                    return (ranges.end(i) - position) >= HOLD_BUFFER_S;
-                }
+        try { ranges = vid.buffered; } catch (err) { return NO_RANGES; }
+        if (!ranges || !ranges.length) return NO_RANGES;
+
+        for (var i = 0; i < ranges.length; i++) {
+            if (position >= ranges.start(i) - 1 && position <= ranges.end(i)) {
+                return ranges.end(i) - position;
             }
-        } catch (err) {}
+        }
+
+        return OUT_OF_RANGE;
+    }
+
+    function holdReadyNow(vid) {
+        if (!vid) return false;
+
+        var now = Date.now();
+        var ahead = bufferedAhead(vid, holdPosition);
+
+        if (ahead > holdBufferSeen + 0.25) {
+            holdBufferSeen = ahead;
+            holdBufferAt = now;
+        }
+
+        if (ahead === NO_RANGES) return vid.readyState >= 3;
+
+        if (ahead >= HOLD_BUFFER_S) return true;
+        if (vid.readyState >= 4 && ahead > 0) return true;
+
+        var idle = now - (holdBufferAt || now);
+
+        if (ahead >= HOLD_MIN_BUFFER_S && idle > HOLD_STALL_MS) {
+            lplog('hold: buffer stopped growing at', ahead.toFixed(2) + 's - accepting');
+            return true;
+        }
+
+        if (!holdNudgeDone && idle > HOLD_NUDGE_MS && vid.readyState >= 1) {
+            holdNudgeDone = true;
+            lplog('hold: nudging loader, ahead=' + ahead.toFixed(2) + ' pos=' + (vid.currentTime || 0).toFixed(2));
+            setExpectedSeek(holdPosition);
+            vid.currentTime = holdPosition + 0.05;
+        }
 
         return false;
+    }
+
+    function resetHoldProgress() {
+        holdBufferSeen = -1;
+        holdBufferAt = Date.now();
+        holdNudgeDone = false;
     }
 
     function startJoinHold(newcomerPid) {
@@ -1390,6 +1437,7 @@
             holdPosition = vid ? (vid.currentTime || 0) : 0;
             holdWaiting = {};
             holdReadySent = false;
+            resetHoldProgress();
 
             if (vid && !vid.paused) {
                 expectPause();
@@ -1421,7 +1469,7 @@
             if (holdWaiting.hasOwnProperty(key)) return;
         }
 
-        if (!bufferReady(getVideo(), holdPosition)) return;
+        if (!holdReadyNow(getVideo())) return;
 
         finishHold();
     }
@@ -1442,6 +1490,7 @@
         holdActive = false;
         holdWaiting = {};
         holdReadySent = false;
+        resetHoldProgress();
         if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
 
         initialSyncLock = false;
@@ -1467,8 +1516,10 @@
         holdActive = true;
         holdPosition = position || 0;
         holdReadySent = false;
+        resetHoldProgress();
 
         Lampa.Noty.show(T.notice_hold);
+        lplog('hold received at', holdPosition.toFixed(2));
 
         var vid = getVideo();
         if (!vid) return;
@@ -1490,10 +1541,13 @@
         if (iAmHost()) return checkHoldDone();
 
         if (holdReadySent) return;
-        if (!bufferReady(getVideo(), holdPosition)) return;
+
+        var vid = getVideo();
+        if (!holdReadyNow(vid)) return;
+        if (!roomSend({ t: 'ready' })) return;
 
         holdReadySent = true;
-        roomSend({ t: 'ready' });
+        lplog('hold: ready sent, ahead=' + bufferedAhead(vid, holdPosition).toFixed(2));
     }
 
     function sendSync(state, verb) {
