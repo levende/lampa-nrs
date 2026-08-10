@@ -9,7 +9,7 @@
 
     var META = {
         name: 'LParty',
-        version: '1.3.4',
+        version: '1.3.5',
         author: 'nrsua, levende'
     };
 
@@ -1406,14 +1406,27 @@
         return vid;
     }
 
+    function roomMarker() {
+        if (!currentRoomId) return '';
+        try {
+            return btoa(unescape(encodeURIComponent(currentRoomId + ':' + (currentRoomPassword || ''))));
+        } catch (err) {
+            return '';
+        }
+    }
+
     function playRoomStream(url, title, poster) {
-        lplog('start room stream', url ? url.substr(0, 60) : '');
+        var launch = playerLaunch();
+
+        lplog('start room stream via', launch, url ? url.substr(0, 60) : '');
 
         Lampa.Player.play({
-            url: withRoomParam(url),
+            url: url,
             title: title || '',
             poster: poster || '',
-            launch_player: playerLaunch()
+            launch_player: launch,
+            lparty_room: currentRoomId || '',
+            lparty_data: roomMarker()
         });
     }
 
