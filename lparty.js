@@ -2,14 +2,14 @@
     'use strict';
 
     if (window.LParty_plugin_started) {
-        console.log('[LParty] Already running.');
+        console.log('[LParty]', 'Already running.');
         return;
     }
     window.LParty_plugin_started = true;
 
     var META = {
         name: 'LParty',
-        version: '1.3.5',
+        version: '1.3.6',
         author: 'nrsua, levende'
     };
 
@@ -237,6 +237,8 @@
 
     var logRing = [];
 
+    var playerLaunch = Lampa.Storage.get('lparty_player', 'inner');
+
     function lplog() {
         var text = Array.prototype.slice.call(arguments).join(' ');
         var stamp = new Date().toISOString().substr(11, 12);
@@ -257,22 +259,19 @@
         var custom = (Lampa.Storage.get('lparty_display_name', '') || '').toString().trim();
         return custom || pid;
     }
+
     function isUsePassword() {
         return Lampa.Storage.field('lparty_use_password') === true;
     }
+
     function getDefaultPassword() {
         return (Lampa.Storage.get('lparty_default_password', '') || '').toString();
     }
+
     function isPublish() {
         return Lampa.Storage.field('lparty_publish') !== false;
     }
-    function isAndroid() {
-        return !!(Lampa.Platform && Lampa.Platform.is && Lampa.Platform.is('android'));
-    }
-    function playerLaunch() {
-        if (isAndroid() && Lampa.Storage.get('lparty_player', 'lampa') === 'android') return 'android';
-        return 'lampa';
-    }
+
     function getRelay() {
         var v = (Lampa.Storage.get('lparty_relay', '') || '').toString().trim();
         if (!v) v = DEFAULT_RELAY;
@@ -457,7 +456,7 @@
             }
 
             self.ws.onopen = function () {
-                lplog('ws open', self.channel);
+                console.log('[LParty] ws open', self.channel);
                 self.onEvent({ kind: 'open' });
             };
 
@@ -510,7 +509,7 @@
             };
 
             self.ws.onclose = function () {
-                lplog('ws close', self.channel, self.closed ? '(by us)' : '(remote)');
+                console.log('[LParty] ws close', self.channel, self.closed ? '(by us)' : '(remote)');
                 self.uid = null;
                 self.members = [];
                 self.onEvent({ kind: 'close' });
@@ -901,7 +900,7 @@
     }
 
     function leaveRoom(sendBye) {
-        if (inRoom || joining) lplog('leave room', currentRoomId || '');
+        if (inRoom || joining) console.log('[LParty]', lplog('leave room', currentRoomId || ''));
         if (room) {
             if (sendBye && room.alive()) roomSend({ t: 'bye' });
             room.close();
@@ -920,6 +919,10 @@
         if (!url || !currentRoomId || url.search(/[?&]room=/) !== -1) return url;
         var data = btoa(unescape(encodeURIComponent(currentRoomId + ':' + (currentRoomPassword || ''))));
         return url + (url.indexOf('?') === -1 ? '?' : '&') + 'room=' + encodeURIComponent(data);
+    }
+
+    function inviteLink() {
+        return withRoomParam('https://siaivo.isroot.in/lparty/');
     }
 
     function connectRoom(roomId, password, onReady) {
@@ -941,14 +944,35 @@
         startClockTimers();
     }
 
+    function androidRoomHandoff(roomId, password, name, meta) {
+        currentRoomId = roomId;
+        currentRoomPassword = password || '';
+        currentRoomName = name || roomId;
+        currentRoomMeta = {
+            title: (meta && meta.title) || '',
+            poster: (meta && meta.poster) || '',
+            url: (meta && meta.url) || inviteLink(),
+            tmdb_id: (meta && meta.tmdb_id) || 0,
+            source: (meta && meta.source) || '',
+            type: (meta && meta.type) || 'movie'
+        };
+
+        console.log('[LParty] android player: room', roomId, 'handed to player, no relay socket from lampa');
+
+        closeSettings();
+        playRoomStream(currentRoomMeta.url, currentRoomMeta.title || currentRoomName, currentRoomMeta.poster);
+    }
+
     function joinRoom(roomId, password, fallbackName) {
+        if (playerLaunch === 'android') return androidRoomHandoff(roomId, password, fallbackName, null);
+
         Lampa.Noty.show(T.connecting);
 
         joining = true;
         currentRoomName = fallbackName || roomId;
 
         connectRoom(roomId, password, function (ev) {
-            lplog('join: channel ready, total', ev.total);
+            console.log('[LParty] join: channel ready, total', ev.total);
             roomSend({ t: 'hello', n: getDisplayName() });
 
             if (ev.total <= 1) {
@@ -963,7 +987,7 @@
 
     function failJoin() {
         if (!joining) return;
-        lplog('join failed - no answer from room');
+        console.log('[LParty] join failed - no answer from room');
         Lampa.Noty.show(T.no_room);
         leaveRoom(false);
     }
@@ -1079,6 +1103,7 @@
             Lampa.Noty.show(T.need_url);
             return;
         }
+
         createPending = true;
 
         var id = newRoomId();
@@ -1115,7 +1140,7 @@
             if (hostAlreadyPlaying && playerIsOpen() && vid) {
                 roomSend({ t: 'sync', s: vid.paused ? 'paused' : 'playing', p: vid.currentTime || 0 });
             } else {
-                if (hostAlreadyPlaying) lplog('player was expected open but is not - starting it');
+                if (hostAlreadyPlaying) console.log('[LParty]', lplog('player was expected open but is not - starting it'));
 
                 closeSettings();
 
@@ -1217,7 +1242,7 @@
             var reconnected = seenAt && (Date.now() - seenAt) < RECONNECT_HELLO_MS;
             if (m.u) knownPids[m.u] = Date.now();
 
-            lplog('hello from', m.u, reconnected ? '(reconnect)' : '(new)');
+            console.log('[LParty] hello from', m.u, reconnected ? '(reconnect)' : '(new)');
 
             if (iAmHost() && !reconnected) startJoinHold(m.u);
 
@@ -1416,17 +1441,15 @@
     }
 
     function playRoomStream(url, title, poster) {
-        var launch = playerLaunch();
+        console.log('[LParty]', 'start room stream via', playerLaunch, url ? url.substr(0, 60) : '');
 
-        lplog('start room stream via', launch, url ? url.substr(0, 60) : '');
+        if (Lampa.Player.runas) Lampa.Player.runas(playerLaunch);
 
         Lampa.Player.play({
             url: url,
             title: title || '',
             poster: poster || '',
-            launch_player: launch,
-            lparty_room: currentRoomId || '',
-            lparty_data: roomMarker()
+            launch_player: playerLaunch
         });
     }
 
@@ -1476,13 +1499,13 @@
         var idle = now - (holdBufferAt || now);
 
         if (ahead >= HOLD_MIN_BUFFER_S && idle > HOLD_STALL_MS) {
-            lplog('hold: buffer stopped growing at', ahead.toFixed(2) + 's - accepting');
+            console.log('[LParty]', 'hold: buffer stopped growing at', ahead.toFixed(2) + 's - accepting');
             return true;
         }
 
         if (!holdNudgeDone && idle > HOLD_NUDGE_MS && vid.readyState >= 1) {
             holdNudgeDone = true;
-            lplog('hold: nudging loader, ahead=' + ahead.toFixed(2) + ' pos=' + (vid.currentTime || 0).toFixed(2));
+            console.log('[LParty]', 'hold: nudging loader, ahead=' + ahead.toFixed(2) + ' pos=' + (vid.currentTime || 0).toFixed(2));
             setExpectedSeek(holdPosition);
             vid.currentTime = holdPosition + 0.05;
         }
@@ -1514,7 +1537,7 @@
             }
 
             Lampa.Noty.show(T.notice_hold);
-            lplog('hold start at', holdPosition.toFixed(2));
+            console.log('[LParty]', 'hold start at', holdPosition.toFixed(2));
         }
 
         if (newcomerPid && newcomerPid !== pid) holdWaiting[newcomerPid] = true;
@@ -1548,7 +1571,7 @@
 
         var position = holdPosition;
 
-        lplog('hold finish at', position.toFixed(2));
+        console.log('[LParty]', 'hold finish at', position.toFixed(2));
         roomSend({ t: 'go', p: position });
         releaseHold(position);
     }
@@ -1588,7 +1611,7 @@
         resetHoldProgress();
 
         Lampa.Noty.show(T.notice_hold);
-        lplog('hold received at', holdPosition.toFixed(2));
+        console.log('[LParty]', 'hold received at', holdPosition.toFixed(2));
 
         var vid = getVideo();
         if (!vid) return;
@@ -1616,7 +1639,7 @@
         if (!roomSend({ t: 'ready' })) return;
 
         holdReadySent = true;
-        lplog('hold: ready sent, ahead=' + bufferedAhead(vid, holdPosition).toFixed(2));
+        console.log('[LParty]', 'hold: ready sent, ahead=' + bufferedAhead(vid, holdPosition).toFixed(2));
     }
 
     function sendSync(state, verb) {
@@ -1723,11 +1746,11 @@
 
                 if (Date.now() - lastHardSeekAt > HARD_SEEK_COOLDOWN_MS) {
                     lastHardSeekAt = Date.now();
-                    lplog('hard seek', vid.currentTime.toFixed(2), '->', expected.toFixed(2));
+                    console.log('[LParty]', 'hard seek', vid.currentTime.toFixed(2), '->', expected.toFixed(2));
                     setExpectedSeek(expected);
                     vid.currentTime = expected;
                 } else {
-                    lplog('hard seek skipped (cooldown), drift', absDiff.toFixed(2));
+                    console.log('[LParty]', 'hard seek skipped (cooldown), drift', absDiff.toFixed(2));
                 }
             } else if (canAdjustRate() && (vid._lp_correcting ? absDiff > SYNC_TOLERANCE_S : absDiff > SYNC_CORRECT_ON_S)) {
                 vid._lp_correcting = true;
@@ -1815,20 +1838,20 @@
 
         vid.addEventListener('waiting', function () {
             vid._lp_buffering = true;
-            lplog('buffering start at', (vid.currentTime || 0).toFixed(2));
+            console.log('[LParty]', 'buffering start at', (vid.currentTime || 0).toFixed(2));
         });
         vid.addEventListener('canplay', function () {
-            if (vid._lp_buffering) lplog('buffering end at', (vid.currentTime || 0).toFixed(2));
+            if (vid._lp_buffering) console.log('[LParty]', 'buffering end at', (vid.currentTime || 0).toFixed(2));
             vid._lp_buffering = false;
         });
         vid.addEventListener('playing', function () {
-            if (vid._lp_buffering) lplog('buffering end at', (vid.currentTime || 0).toFixed(2));
+            if (vid._lp_buffering) console.log('[LParty]', 'buffering end at', (vid.currentTime || 0).toFixed(2));
             vid._lp_buffering = false;
         });
         vid.addEventListener('error', function () {
-            lplog('video error', vid.error ? ('code ' + vid.error.code) : '');
+            console.log('[LParty]', 'video error', vid.error ? ('code ' + vid.error.code) : '');
         });
-        vid.addEventListener('stalled', function () { lplog('video stalled'); });
+        vid.addEventListener('stalled', function () { console.log('[LParty]', 'video stalled'); });
 
         vid.addEventListener('play', function () {
             if (initialSyncLock) {
@@ -1842,7 +1865,7 @@
             if (wasExpected) return;
 
             if (holdActive) {
-                lplog('user started playback during hold - releasing it');
+                console.log('[LParty]', 'user started playback during hold - releasing it');
                 lastUserActionTime = Date.now();
 
                 if (iAmHost()) {
@@ -1889,7 +1912,7 @@
             if (isSystemSyncing) return;
 
             if (seekIsOurs()) {
-                lplog('own seek settled at', (vid.currentTime || 0).toFixed(2));
+                console.log('[LParty]', 'own seek settled at', (vid.currentTime || 0).toFixed(2));
                 clearExpectedSeek();
                 lastKnownPosition = vid.currentTime || 0;
                 return;
@@ -1898,12 +1921,12 @@
             if (expectedState.seek !== -1) clearExpectedSeek();
 
             if (Math.abs((vid.currentTime || 0) - lastKnownPosition) < SEEK_MIN_JUMP_S) {
-                lplog('seek ignored, position barely moved', (vid.currentTime || 0).toFixed(2));
+                console.log('[LParty]', 'seek ignored, position barely moved', (vid.currentTime || 0).toFixed(2));
                 return;
             }
 
             if (Date.now() - lastSeekBroadcastAt < SEEK_BROADCAST_MIN_MS) {
-                lplog('seek broadcast throttled at', (vid.currentTime || 0).toFixed(2));
+                console.log('[LParty]', 'seek broadcast throttled at', (vid.currentTime || 0).toFixed(2));
                 return;
             }
 
@@ -2037,18 +2060,22 @@
             field: { name: T.param_name, description: T.param_name_descr }
         });
 
-        if (isAndroid()) {
+        if (Lampa.Platform.is('android')) {
             Lampa.SettingsApi.addParam({
                 component: 'lparty',
                 param: {
                     name: 'lparty_player',
                     type: 'select',
-                    values: { lampa: Lampa.Lang.translate('settings_param_player_inner'), android: 'Android' },
-                    default: 'lampa'
+                    values: { inner: Lampa.Lang.translate('settings_param_player_inner'), android: 'Android' },
+                    default: 'inner'
                 },
                 field: {
                     name: Lampa.Lang.translate('settings_player_type'),
                     description: Lampa.Lang.translate('settings_player_type_descr')
+                },
+                onChange: function (value) {
+                    Lampa.Storage.set('lparty_player', value);
+                    playerLaunch = value;
                 }
             });
         }
@@ -2146,7 +2173,7 @@
                 uiPrevController = 'player';
 
                 setTimeout(function () {
-                    lplog('auto create room from card menu');
+                    console.log('[LParty]', 'auto create room from card menu');
                     autoCreateRoomFromPending(card, url);
                 }, SHARE_START_DELAY_MS);
             }
@@ -2186,7 +2213,7 @@
     });
 
     function showRoomQr() {
-        var link = withRoomParam('https://siaivo.isroot.in/lparty/');
+        var link = inviteLink();
         var qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=600x600&data=' + encodeURIComponent(link);
 
         var isMobile = Lampa.Platform && Lampa.Platform.screen && Lampa.Platform.screen('mobile');
@@ -2247,7 +2274,7 @@
             if (hasPlayer && hasFileMenu) {
                 items.push({
                     title: T.full_card_btn,
-                    player: 'lampa',
+                    player: 'inner',
                     lparty_inject: true
                 });
 
