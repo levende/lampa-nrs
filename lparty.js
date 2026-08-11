@@ -9,7 +9,7 @@
 
     var META = {
         name: 'LParty',
-        version: '1.3.7',
+        version: '1.4.0',
         author: 'nrsua, levende'
     };
 
@@ -68,6 +68,10 @@
             player_qr_descr: 'Показати QR-код для запрошення друзів',
             qr_title: 'Приєднатися до кімнати',
             qr_hint: 'Скануйте камерою телефона',
+            qr_copy: 'Копіювати посилання',
+            qr_share: 'Поділитися',
+            qr_copied: 'Посилання скопійовано',
+            qr_copy_fail: 'Не вдалося скопіювати посилання',
             already_in_room: function (n) { return 'Ви вже в кімнаті "' + n + '"'; },
             leave_btn: 'Покинути кімнату',
             left_ok: 'Ви покинули кімнату',
@@ -127,6 +131,10 @@
             player_qr_descr: 'Show a QR code to invite friends',
             qr_title: 'Join the room',
             qr_hint: 'Scan with your phone camera',
+            qr_copy: 'Copy link',
+            qr_share: 'Share',
+            qr_copied: 'Link copied',
+            qr_copy_fail: 'Could not copy the link',
             already_in_room: function (n) { return 'You are already in room "' + n + '"'; },
             leave_btn: 'Leave room',
             left_ok: 'You left the room',
@@ -186,6 +194,10 @@
             player_qr_descr: 'Показать QR-код для приглашения друзей',
             qr_title: 'Присоединиться к комнате',
             qr_hint: 'Сканируйте камерой телефона',
+            qr_copy: 'Копировать ссылку',
+            qr_share: 'Поделиться',
+            qr_copied: 'Ссылка скопирована',
+            qr_copy_fail: 'Не удалось скопировать ссылку',
             already_in_room: function (n) { return 'Вы уже в комнате "' + n + '"'; },
             leave_btn: 'Покинуть комнату',
             left_ok: 'Вы покинули комнату',
@@ -2324,6 +2336,72 @@
         if (inRoom) leaveRoom(true);
     });
 
+    var ICON_COPY = '<svg viewBox="0 0 24 24" width="1.3em" height="1.3em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    var ICON_SHARE = '<svg viewBox="0 0 24 24" width="1.3em" height="1.3em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"></path></svg>';
+
+    function canShare() {
+        try {
+            return typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+        } catch (err) {
+            return false;
+        }
+    }
+
+    function legacyCopy(text) {
+        try {
+            var area = document.createElement('textarea');
+
+            area.value = text;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.top = '-1000px';
+            area.style.opacity = '0';
+
+            document.body.appendChild(area);
+            area.select();
+            if (area.setSelectionRange) area.setSelectionRange(0, text.length);
+
+            var ok = document.execCommand('copy');
+
+            document.body.removeChild(area);
+
+            return !!ok;
+        } catch (err) {
+            return false;
+        }
+    }
+
+    function copyToClipboard(text, done) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(function () {
+                    done(true);
+                }, function () {
+                    done(legacyCopy(text));
+                });
+                return;
+            }
+        } catch (err) {}
+
+        done(legacyCopy(text));
+    }
+
+    function ensureQrStyle() {
+        if (document.getElementById('lparty-qr-style')) return;
+
+        var style = document.createElement('style');
+
+        style.id = 'lparty-qr-style';
+        style.textContent =
+            '.lparty-qr-actions{display:flex;justify-content:center;gap:0.8em;margin-top:0.9em;}' +
+            '.lparty-qr-btn{display:inline-flex;align-items:center;justify-content:center;width:2.8em;height:2.8em;' +
+            'border-radius:50%;background:rgba(255,255,255,0.14);color:#fff;cursor:pointer;' +
+            'transition:background 0.2s,color 0.2s,transform 0.2s;}' +
+            '.lparty-qr-btn.focus,.lparty-qr-btn:hover{background:#fff;color:#000;transform:scale(1.08);}';
+
+        document.head.appendChild(style);
+    }
+
     function showRoomQr() {
         var link = inviteLink();
         var qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=600x600&data=' + encodeURIComponent(link);
@@ -2331,15 +2409,55 @@
         var isMobile = Lampa.Platform && Lampa.Platform.screen && Lampa.Platform.screen('mobile');
         uiPrevController = isMobile ? 'player' : 'player_panel';
 
+        ensureQrStyle();
+
+        var actions = '<div class="lparty-qr-actions">' +
+            '<div class="lparty-qr-btn selector" data-lparty-action="copy" title="' + safe(T.qr_copy) + '">' + ICON_COPY + '</div>' +
+            (canShare() ? '<div class="lparty-qr-btn selector" data-lparty-action="share" title="' + safe(T.qr_share) + '">' + ICON_SHARE + '</div>' : '') +
+            '</div>';
+
+        var body = $('<div style="text-align:center;">' +
+            '<div style="font-size:1.6em;font-weight:300;margin-bottom:0.8em;">' + T.qr_title + ' - ' + safe(currentRoomName || currentRoomId || '') + '</div>' +
+            '<img src="' + qrUrl + '" style="width:20em;max-width:70vw;height:auto;background:#fff;padding:0.6em;border-radius:0.6em;" />' +
+            '<div style="margin-top:1em;opacity:0.7;">' + T.qr_hint + '</div>' +
+            '<div style="margin-top:0.5em;font-size:0.8em;opacity:0.5;word-break:break-all;">' + safe(link) + '</div>' +
+            actions +
+            '</div>');
+
         Lampa.Modal.open({
             title: '',
             size: 'medium',
-            html: $('<div style="text-align:center;">' +
-                '<div style="font-size:1.6em;font-weight:300;margin-bottom:0.8em;">' + T.qr_title + ' - ' + safe(currentRoomName || currentRoomId || '') + '</div>' +
-                '<img src="' + qrUrl + '" style="width:20em;max-width:70vw;height:auto;background:#fff;padding:0.6em;border-radius:0.6em;" />' +
-                '<div style="margin-top:1em;opacity:0.7;">' + T.qr_hint + '</div>' +
-                '<div style="margin-top:0.5em;font-size:0.8em;opacity:0.5;word-break:break-all;">' + safe(link) + '</div>' +
-                '</div>'),
+            html: body,
+            select: body.find('[data-lparty-action="copy"]')[0],
+            onSelect: function (item) {
+                var target = $(item);
+                var action = target.attr('data-lparty-action') || target.closest('[data-lparty-action]').attr('data-lparty-action');
+
+                if (action === 'copy') {
+                    copyToClipboard(link, function (ok) {
+                        lplog('invite link copy', ok ? 'ok' : 'failed');
+                        Lampa.Noty.show(ok ? T.qr_copied : T.qr_copy_fail);
+                    });
+                    return;
+                }
+
+                if (action === 'share') {
+                    try {
+                        var shared = navigator.share({
+                            title: T.qr_title,
+                            text: currentRoomName || currentRoomId || T.qr_title,
+                            url: link
+                        });
+
+                        if (shared && shared['catch']) shared['catch'](function (err) {
+                            if (err && err.name === 'AbortError') return;
+                            lplog('share failed', err && err.name);
+                        });
+                    } catch (err) {
+                        lplog('share threw', err && err.message);
+                    }
+                }
+            },
             onBack: function () {
                 Lampa.Modal.close();
                 restoreController();
