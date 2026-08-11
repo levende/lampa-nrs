@@ -2396,8 +2396,8 @@
             '.lparty-qr-actions{display:flex;justify-content:center;gap:0.8em;margin-top:0.9em;}' +
             '.lparty-qr-btn{display:inline-flex;align-items:center;justify-content:center;width:2.8em;height:2.8em;' +
             'border-radius:50%;background:rgba(255,255,255,0.14);color:#fff;cursor:pointer;' +
-            'transition:background 0.2s,color 0.2s,transform 0.2s;}' +
-            '.lparty-qr-btn.focus,.lparty-qr-btn:hover{background:#fff;color:#000;transform:scale(1.08);padding:0.7em;}';
+            'transition:background 0.2s,color 0.2s,transform 0.2s;padding:0.7em;}' +
+            '.lparty-qr-btn.focus,.lparty-qr-btn:hover{background:#fff;color:#000;transform:scale(1.08);}';
 
         document.head.appendChild(style);
     }
