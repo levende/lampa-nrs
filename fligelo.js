@@ -3,10 +3,10 @@
 
     if (window.fligel_online) return;
 
-    var VERSION   = '1.0.0';
-    var NAME, TITLE, COMPONENT, EMBED_HOST, CONSUMER, API_HOSTS, API_AUTH, TMDB_API_KEY;
+    var VERSION   = '1.0.1';
+    var _fx = (function(k){return function(d){for(var s='',i=0;i<d.length;i+=4)s+=String.fromCharCode(parseInt(d.substr(i,4),16)^k.charCodeAt(i/4%k.length));return s}})('fL1g3l-0nl1n3-K3y');
 
-    eval(function(d,k){for(var s='',i=0;i<d.length;i+=4)s+=String.fromCharCode(parseInt(d.substr(i,4),16)^k.charCodeAt(i/4%k.length));return s}('0028000d007c002200130051000d0017044a04570467045d040604160407001400420046001800780033007f0029000d000d004e004b042f04530408041d0472040e0059044204770467045404060457046100170055004c00720021007e007d0004007d003c002800180011005a0013004b004b005c0007000b00540002006c00420025005f0010000800290016005c0013002900600072002b0028006e0026007c007e001f001300440046006b005900130047001c005e000a004100430050001e005a0003003100560017000f00380059000d00400042005a0043004900570011002d007c00630018006600340023001e0011005a0013004b0041005900080018001f000d005c0040006c000800590027001c00780038007b0023007e0064003d004c000c004e0068000a00230047000d0016003f000b0048001c000d005d0059004000000050001a0056005f002e005e001b0048003b00420040001f004c000a0058001a00180041001d00090002006400520009000f00620054000a0051000d00430054001c00420046001d0014007000700013003800360005006e002600660038006500100053004c00160002005a004b003f00020043000a0025005700130002004b00160010003a00210075002c006c006c001b007a0026002d000900680047000e004c000a0004000b000a0001000a0004001e007e0006001d005f002a005700050006005d00180001000b0055000900590004001b007f00040049005e002f0054005e0005004b0016','fL1g3l-0nl1n3-K3y'));
+    var NAME = _fx('0442047704670454040604570461'), TITLE = _fx('04780471040a0457040a0451000d04140455043a0402045b04080461'), COMPONENT = _fx('0000002000580000005600000072005f00000000005800000056'), EMBED_HOST = _fx('000e003800450017004000560002001f000f001c00580040004900480025005a000d000e0026004200490044001f'), CONSUMER = _fx('000a002500570013001d000f0042005d'), API_HOSTS = [_fx('000e003800450017004000560002001f000f001c00580040005f004c003f0056000b00030021005300490044001f'), _fx('000e003800450017004000560002001f000f001c00580040005600400029005200170002003e001f00100040')], API_AUTH = _fx('000a0025005700130002005600410059000800180000'), TMDB_API_KEY = _fx('00520029005700570057005b001e0005005b0008000800080055004f007e0002004c005700290008005f0004005b001b00040059005c0009000d00560014007d'), HLS_PROXY = _fx('000e003800450017004000560002001f001d00180043000b0052004000650056000b0008002d004900490043001e0042001f001e001e005e0016004a00000023005f000a005900390043000b000e');
 
     var api_host    = '';
     var api_expires = 0;
@@ -78,7 +78,11 @@
     function stringOf(text, key) {
         var found = new RegExp('(^|[^\\w$])' + key + '\\s*:\\s*(["\'])((?:\\\\.|(?!\\2)[^\\\\])*)\\2').exec(text);
 
-        return found ? found[3].replace(/\\(["'\\\/])/g, '$1') : '';
+        if (!found) return '';
+
+        return found[3].replace(/\\u([0-9a-fA-F]{4})/g, function (all, hex) {
+            return String.fromCharCode(parseInt(hex, 16));
+        }).replace(/\\(["'\\\/])/g, '$1');
     }
 
     function sortSeasons(seasons) {
@@ -132,6 +136,7 @@
             hls: stringOf(source, 'hls'),
             dash: stringOf(source, 'dash'),
             dasha: stringOf(source, 'dasha'),
+            download: stringOf(block, 'download') || stringOf(html, 'download'),
             audio: jsonOf(source, 'audio', '{'),
             cc: jsonOf(source, 'cc', '[')
         };
@@ -155,8 +160,267 @@
         return source.dasha || source.dash || '';
     }
 
+    var webm_support = null;
+    var webkit_only = null;
+
+    function webmSupport() {
+        if (webm_support !== null) return webm_support;
+
+        webm_support = false;
+
+        try {
+            if (window.MediaSource && typeof window.MediaSource.isTypeSupported === 'function') {
+                webm_support = window.MediaSource.isTypeSupported('video/webm; codecs="vp9,opus"');
+            }
+        }
+        catch (e) {
+            webm_support = false;
+        }
+
+        return webm_support;
+    }
+
+    function webkitOnly() {
+        if (webkit_only !== null) return webkit_only;
+
+        var agent = (navigator.userAgent || '').toLowerCase();
+
+        webkit_only = /iphone|ipad|ipod/.test(agent) || (/safari/.test(agent) && !/chrome|crios|chromium|android|edg\/|opr\/|yabrowser/.test(agent));
+
+        try {
+            if (Lampa.Platform && Lampa.Platform.is && (Lampa.Platform.is('apple') || Lampa.Platform.is('apple_tv'))) webkit_only = true;
+        }
+        catch (e) {}
+
+        return webkit_only;
+    }
+
+    function dashPlayable() {
+        return !webkitOnly() && typeof dashjs !== 'undefined' && webmSupport();
+    }
+
+    function hlsjsReady() {
+        try {
+            return typeof Hls !== 'undefined' && Hls.isSupported();
+        }
+        catch (e) {
+            return false;
+        }
+    }
+
+    function report() {
+        try {
+            var args = [NAME];
+
+            for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+
+            console.log.apply(console, args);
+        }
+        catch (e) {}
+    }
+
+    function videoNodes() {
+        var list = [];
+
+        try {
+            if (Lampa.PlayerVideo && Lampa.PlayerVideo.video) {
+                var one = Lampa.PlayerVideo.video();
+
+                if (one) list.push(one);
+            }
+        }
+        catch (e) {}
+
+        try {
+            var nodes = document.getElementsByTagName('video');
+
+            for (var i = 0; i < nodes.length; i++) {
+                if (list.indexOf(nodes[i]) === -1) list.push(nodes[i]);
+            }
+        }
+        catch (e) {}
+
+        return list;
+    }
+
+    function dropCrossOrigin(tag) {
+        var nodes = videoNodes();
+        var stripped = 0;
+
+        nodes.forEach(function (video) {
+            try {
+                if (!video.getAttribute || !video.getAttribute('crossorigin')) return;
+
+                video.removeAttribute('crossorigin');
+                video.crossOrigin = null;
+
+                stripped++;
+
+                if (video.src) video.load();
+            }
+            catch (e) {}
+        });
+
+        report('crossorigin ' + (tag || '') + ': елементів ' + nodes.length + ', знято ' + stripped + ', PlayerVideo ' + !!(Lampa.PlayerVideo && Lampa.PlayerVideo.video));
+    }
+
+    function watchCrossOrigin() {
+        var left = 20;
+        var timer = setInterval(function () {
+            if (--left <= 0) return clearInterval(timer);
+
+            var nodes = videoNodes();
+
+            for (var i = 0; i < nodes.length; i++) {
+                if (nodes[i].getAttribute && nodes[i].getAttribute('crossorigin')) return dropCrossOrigin('дозняв');
+            }
+        }, 150);
+    }
+
+    function checkStatus(url, tag) {
+        if (!url) return;
+
+        try {
+            var xhr = new XMLHttpRequest();
+
+            xhr.open('GET', url, true);
+
+            xhr.onload = function () {
+                report(tag + ': HTTP ' + xhr.status + ' ' + String(xhr.responseText || '').slice(0, 60).replace(/\s+/g, ' '));
+            };
+
+            xhr.onerror = function () {
+                report(tag + ': запит не пройшов (мережа або CORS), status ' + xhr.status);
+            };
+
+            xhr.send();
+        }
+        catch (e) {
+            report(tag + ': виняток ' + e.message);
+        }
+    }
+
+    function probeUrl(url, cors, done) {
+        if (!url) return done('немає');
+
+        var video = document.createElement('video');
+
+        if (cors) video.setAttribute('crossorigin', 'anonymous');
+        var timer = setTimeout(function () {
+            finish('таймаут');
+        }, 10000);
+
+        function finish(result) {
+            clearTimeout(timer);
+
+            video.onloadedmetadata = null;
+            video.onerror = null;
+
+            try {
+                video.removeAttribute('src');
+                video.load();
+            }
+            catch (e) {}
+
+            done(result);
+        }
+
+        video.muted = true;
+        video.preload = 'metadata';
+
+        video.onloadedmetadata = function () {
+            finish('грає ' + video.videoWidth + 'x' + video.videoHeight);
+        };
+
+        video.onerror = function () {
+            finish('помилка ' + ((video.error && video.error.code) || '?'));
+        };
+
+        video.src = url;
+
+        try {
+            video.load();
+        }
+        catch (e) {}
+    }
+
+    function diagnose(element) {
+        var lines = ['origin: ' + (window.location ? window.location.origin : '?')];
+
+        lines.push('обрано ' + (element.file === element.dash ? 'DASH' : element.file === element.mp4 ? 'MP4' : 'HLS') + ', webkit ' + webkitOnly() + ', MSE ' + !!window.MediaSource + ', dashjs ' + (typeof dashjs !== 'undefined'));
+
+        Lampa.Noty.show('перевіряю потоки…', { time: 40000 });
+
+        probeUrl(element.hls, false, function (plain) {
+            lines.push('HLS без crossorigin: ' + plain);
+
+            probeUrl(element.hls, true, function (cors) {
+                lines.push('HLS з crossorigin: ' + cors);
+
+                probeUrl(element.mp4, false, function (mp4) {
+                    lines.push('MP4: ' + mp4);
+
+                    Lampa.Noty.show(lines.join('<br>'), { time: 60000 });
+                });
+            });
+        });
+    }
+
+    var stall_timer = null;
+
+    function proxyUrl(url) {
+        if (!url || !HLS_PROXY || url.indexOf(HLS_PROXY) === 0) return '';
+
+        return HLS_PROXY + encodeURIComponent(url);
+    }
+
+    function watchStall(next_url, then_url) {
+        if (stall_timer) clearTimeout(stall_timer);
+
+        if (!next_url || !webkitOnly() || !Lampa.PlayerVideo || !Lampa.PlayerVideo.video) return;
+
+        stall_timer = setTimeout(function () {
+            try {
+                if (!Lampa.Player.opened || !Lampa.Player.opened()) return;
+
+                var video = Lampa.PlayerVideo.video();
+
+                if (video && video.readyState >= 2) return;
+
+                var data = Lampa.Player.playdata();
+
+                if (!data || !data.url || data.url === next_url) return;
+
+                var next = {};
+
+                for (var key in data) next[key] = data[key];
+
+                next.url = next_url;
+
+                delete next.url_reserve;
+                delete next.quality;
+
+                Lampa.Player.play(next);
+
+                watchStall(then_url, '');
+            }
+            catch (e) {}
+        }, 8000);
+    }
+
+    function directUrl(url) {
+        return url ? url.replace(/\.m3u8/g, '%2Em3u8').replace(/\.mpd/g, '%2Empd') : '';
+    }
+
+    function pickFile(item) {
+        if (webkitOnly()) return item.hls || item.mp4 || item.dash;
+
+        return dashPlayable() ? (item.dash || item.hls) : (item.hls || item.dash);
+    }
+
     function bestStream(element, labels) {
-        if (!element.dash) return element.hls;
+        if (webkitOnly()) return pickFile(element);
+        if (!element.dash || !dashPlayable()) return element.hls || element.dash;
         if (!element.hls) return element.dash;
 
         var dash = parseInt(labels.dash, 10) || 0;
@@ -240,6 +504,17 @@
                 label: item.label,
                 url: item.url
             };
+        });
+    }
+
+    function keepPlayable() {
+        if (!Lampa.Player || !Lampa.Player.listener) return;
+
+        Lampa.Player.listener.follow('start', function () {
+            setTimeout(function () {
+                dropCrossOrigin('подія start');
+                watchCrossOrigin();
+            }, 0);
         });
     }
 
@@ -651,11 +926,13 @@
             var item = {
                 hls: hls,
                 dash: dash,
-                file: dash || hls,
+                mp4: directUrl(source.download),
                 names: audioNames(source.audio),
                 quality: '',
                 subtitles: subtitlesOf(source.cc, order)
             };
+
+            item.file = pickFile(item);
 
             Lampa.Arrays.extend(item, extra, true);
 
@@ -730,11 +1007,12 @@
                 element.resolved = true;
                 element.file = bestStream(element, labels);
 
-                var picked = element.file === element.hls ? info.hls : info.dash;
+                var picked = element.file === element.dash ? info.dash : info.hls;
+                var direct = element.file === element.mp4;
 
                 element.quality = picked.label;
-                element.level = picked.level;
-                element.list = picked.list;
+                element.level = direct ? -1 : picked.level;
+                element.list = direct ? [] : picked.list;
 
                 var waiting = element.waiting;
 
@@ -843,6 +1121,11 @@
                     },
                     unmark: function () {
                         html.find('.online-prestige__viewed').remove();
+                    },
+                    diagnose: function () {
+                        resolveElement(element, function () {
+                            diagnose(element);
+                        });
                     },
                     file: function (call) {
                         call({ file: element.file });
@@ -954,6 +1237,16 @@
                 subtitles: element.subtitles
             };
 
+            var reserve = '';
+
+            if (element.file === element.mp4) reserve = element.hls;
+            else if (element.file === element.dash) reserve = element.hls || element.mp4;
+            else reserve = webkitOnly() ? element.mp4 : (dashPlayable() ? element.dash : element.mp4);
+
+            if (reserve && reserve !== element.file) data.url_reserve = reserve;
+
+            if (webkitOnly() && hlsjsReady() && data.url.indexOf('.m3u8') !== -1) data.hls_type = 'hlsjs';
+
             if (element.subtitles) data.fligel_subs = element.subtitles.map(function (line) {
                 return line.label;
             });
@@ -996,6 +1289,16 @@
             Lampa.Player.playlist(playlist);
 
             applyParams(playParams(element, element.level));
+
+            setTimeout(function () {
+                dropCrossOrigin('старт');
+                watchCrossOrigin();
+            }, 0);
+
+            report('потік ' + (element.file === element.dash ? 'DASH' : element.file === element.mp4 ? 'MP4' : 'HLS') + ', webkit ' + webkitOnly() + ', MSE ' + !!window.MediaSource + ', hls.js ' + hlsjsReady() + ', origin ' + (window.location ? window.location.origin : '?'));
+            checkStatus(element.file, 'перевірка потоку');
+
+            watchStall(element.mp4, proxyUrl(element.hls));
         }
     }
 
@@ -1230,6 +1533,8 @@
 
                     menu.push({ title: Lampa.Lang.translate('player_lauch') + ' - Lampa', player: 'lampa' });
 
+                    if (params.diagnose) menu.push({ title: 'Перевірити потоки', diagnose: true });
+
                     if (extra && extra.file) menu.push({ title: Lampa.Lang.translate('copy_link'), copylink: true });
 
                     Lampa.Select.show({
@@ -1264,6 +1569,8 @@
                             }
 
                             Lampa.Controller.toggle(enabled);
+
+                            if (a.diagnose) params.diagnose();
 
                             if (a.player) {
                                 Lampa.Player.runas(a.player);
@@ -1495,6 +1802,7 @@
         addLang();
         addTemplates();
         addStyle();
+        keepPlayable();
         keepSubtitles();
 
         Lampa.Component.add(COMPONENT, Component);
