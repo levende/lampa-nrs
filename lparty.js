@@ -799,6 +799,38 @@
         }, LOBBY_COLLECT_MS);
     }
 
+    var ICON_FILM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M8 4v16M16 4v16M3 12h18M3 8h5M3 16h5M16 8h5M16 16h5"></path></svg>';
+
+    function ensureRoomStyle() {
+        if (document.getElementById('lparty-room-style')) return;
+
+        var style = document.createElement('style');
+
+        style.id = 'lparty-room-style';
+        style.textContent =
+            '.selectbox-item__icon > .lparty-poster{width:3.4em;height:5.1em;border-radius:0.3em;' +
+            'background-color:#3e3e3e;object-fit:cover;}' +
+            '.lparty-poster--empty{display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.4);}' +
+            '.lparty-poster--empty > svg{width:1.6em;height:1.6em;}';
+
+        document.head.appendChild(style);
+    }
+
+    function roomPosterStub() {
+        return '<div class="lparty-poster lparty-poster--empty">' + ICON_FILM + '</div>';
+    }
+
+    function roomPoster(r) {
+        if (!r.poster) return roomPosterStub();
+        return '<img class="lparty-poster" src="' + safe(r.poster) + '" />';
+    }
+
+    function bindPosterFallback(item) {
+        item.find('img.lparty-poster').on('error', function () {
+            $(this).replaceWith(roomPosterStub());
+        });
+    }
+
     var browserBusy = false;
 
     function openRoomBrowser() {
@@ -824,14 +856,23 @@
             items.push({ title: '<span style="color:#00e676">+ ' + T.create_btn + '</span>', action: 'create' });
             items.push({ title: '<span style="color:#64b5f6">#  ' + T.join_code_btn + '</span>', action: 'code' });
 
+            if (rooms.length) ensureRoomStyle();
+
             for (var i = 0; i < rooms.length; i++) {
                 var r = rooms[i];
                 var lock = r.pwd ? ' &#128274;' : '';
-                var line2 = safe(r.title || '') + ' &middot; ' + T.label_owner + ': ' + safe(r.owner || '') +
-                    ' &middot; ' + T.label_members + ': ' + (r.members || 0);
+                var line2 = [];
+
+                if (r.title) line2.push(safe(r.title));
+                line2.push(T.label_owner + ': ' + safe(r.owner || ''));
+                line2.push(T.label_members + ': ' + (r.members || 0));
+
                 items.push({
-                    title: '<b>' + safe(r.name || r.id) + '</b> <span style="opacity:.5">[' + safe(r.id) + ']</span>' + lock +
-                        '<br><span style="opacity:.7;font-size:.85em">' + line2 + '</span>',
+                    template: 'selectbox_icon',
+                    icon: roomPoster(r),
+                    title: '<b>' + safe(r.name || r.id) + '</b> <span style="opacity:.5">[' + safe(r.id) + ']</span>' + lock,
+                    subtitle: line2.join(' &middot; '),
+                    onDraw: bindPosterFallback,
                     room: r
                 });
             }
