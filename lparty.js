@@ -9,7 +9,7 @@
 
     var META = {
         name: 'LParty',
-        version: '1.4.0',
+        version: '1.4.1',
         author: 'nrsua, levende'
     };
 
@@ -18,6 +18,10 @@
         uk: {
             menu_title: 'LParty',
             settings_title: 'LParty',
+            param_show_head: 'Відображати LParty на головній',
+            param_show_head_descr: 'Кнопка LParty у верхній панелі головного екрана.',
+            param_show_public: 'Відображати публічні кімнати',
+            param_show_public_descr: 'Показувати при пошуку кімнати без пароля.',
             param_name: 'Ім\'я користувача',
             param_name_descr: 'Як вас бачитимуть інші в кімнатах. Порожньо = ідентифікатор Лампи.',
             param_use_pwd: 'Використовувати пароль',
@@ -81,6 +85,10 @@
         en: {
             menu_title: 'LParty',
             settings_title: 'LParty',
+            param_show_head: 'Show LParty on the main screen',
+            param_show_head_descr: 'LParty button in the top bar of the main screen.',
+            param_show_public: 'Show public rooms',
+            param_show_public_descr: 'List rooms without a password when searching.',
             param_name: 'Display name',
             param_name_descr: 'How others see you in rooms. Empty = Lampa ID.',
             param_use_pwd: 'Use password',
@@ -144,6 +152,10 @@
         ru: {
             menu_title: 'LParty',
             settings_title: 'LParty',
+            param_show_head: 'Показывать LParty на главной',
+            param_show_head_descr: 'Кнопка LParty в верхней панели главного экрана.',
+            param_show_public: 'Показывать публичные комнаты',
+            param_show_public_descr: 'Показывать при поиске комнаты без пароля.',
             param_name: 'Имя пользователя',
             param_name_descr: 'Как вас будут видеть в комнатах. Пусто = идентификатор Лампы.',
             param_use_pwd: 'Использовать пароль',
@@ -283,6 +295,14 @@
 
     function isPublish() {
         return Lampa.Storage.field('lparty_publish') !== false;
+    }
+
+    function isShowHead() {
+        return Lampa.Storage.get('lparty_show_head', 'false') === true;
+    }
+
+    function isShowPublicRooms() {
+        return Lampa.Storage.get('lparty_show_public', 'true') !== false;
     }
 
     function getRelay() {
@@ -768,7 +788,12 @@
             probe.close();
 
             var list = [];
-            for (var id in found) if (found.hasOwnProperty(id)) list.push(found[id]);
+            var withPublic = isShowPublicRooms();
+            for (var id in found) {
+                if (!found.hasOwnProperty(id)) continue;
+                if (!found[id].pwd && !withPublic) continue;
+                list.push(found[id]);
+            }
             list.sort(function (a, b) { return (b.members || 0) - (a.members || 0); });
             done(list);
         }, LOBBY_COLLECT_MS);
@@ -2178,6 +2203,19 @@
 
         Lampa.SettingsApi.addParam({
             component: 'lparty',
+            param: { name: 'lparty_show_head', type: 'trigger', default: false },
+            field: { name: T.param_show_head, description: T.param_show_head_descr },
+            onChange: function () { syncHeadIcon(); }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'lparty',
+            param: { name: 'lparty_show_public', type: 'trigger', default: true },
+            field: { name: T.param_show_public, description: T.param_show_public_descr }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'lparty',
             param: { name: 'lparty_display_name', type: 'input', values: '', default: '', placeholder: pid },
             field: { name: T.param_name, description: T.param_name_descr }
         });
@@ -2238,19 +2276,27 @@
         });
     }
 
+    var headButton = null;
+
     function addHeadIcon() {
         if (window.LParty_head_added) return;
         if (!Lampa.Head || typeof Lampa.Head.addIcon !== 'function') return;
         window.LParty_head_added = true;
 
         var svg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="6"></circle><path d="M10.5 9.5 L10.5 14.5 L15 12 Z" fill="currentColor" stroke="none"></path><circle cx="4" cy="4" r="1.8" fill="currentColor" stroke="none"></circle><circle cx="20" cy="4" r="1.8" fill="currentColor" stroke="none"></circle><circle cx="4" cy="20" r="1.8" fill="currentColor" stroke="none"></circle><circle cx="20" cy="20" r="1.8" fill="currentColor" stroke="none"></circle></svg>';
-        var btn = Lampa.Head.addIcon(svg, openRoomBrowser);
-        if (btn && btn.attr) btn.attr('title', T.menu_title);
+        headButton = Lampa.Head.addIcon(svg, openRoomBrowser);
+        if (headButton && headButton.attr) headButton.attr('title', T.menu_title);
     }
 
-    if (window.appready) addHeadIcon();
+    function syncHeadIcon() {
+        var show = isShowHead();
+        if (show) addHeadIcon();
+        if (headButton && headButton.toggleClass) headButton.toggleClass('hide', !show);
+    }
+
+    if (window.appready) syncHeadIcon();
     else Lampa.Listener.follow('app', function (e) {
-        if (e.type === 'ready') addHeadIcon();
+        if (e.type === 'ready') syncHeadIcon();
     });
 
     Lampa.Listener.follow('full', function (e) {
