@@ -13,6 +13,11 @@
         author: 'nrsua, levende'
     };
 
+    var DEFAULT_RELAY = 'wss://itty.ws/c/';
+    var DEFAULT_INVITE = 'https://siaivo.isroot.in/lparty/';
+    var LOBBY_CHANNEL = 'lparty-lobby-v1';
+    var ROOM_PREFIX = 'lparty-r-';
+
     var _rawLang = (Lampa.Storage.get('language') || 'en').toLowerCase();
     var i18n = {
         uk: {
@@ -31,7 +36,9 @@
             param_publish: 'Показувати кімнату в списку',
             param_publish_descr: 'Вимкніть, щоб до вашої кімнати можна було зайти лише за кодом.',
             param_relay: 'Адреса реле',
-            param_relay_descr: 'WebSocket-реле. За замовчуванням wss://itty.ws/c/',
+            param_relay_descr: 'WebSocket-реле. За замовчуванням ' + DEFAULT_RELAY,
+            param_invite: 'Адреса запрошення',
+            param_invite_descr: 'Базове посилання для QR-коду. За замовчуванням ' + DEFAULT_INVITE,
             head_title: 'LParty - список кімнат',
             create_btn: 'Створити кімнату за посиланням',
             join_code_btn: 'Увійти за кодом кімнати',
@@ -98,7 +105,9 @@
             param_publish: 'List room publicly',
             param_publish_descr: 'Turn off to make your room reachable by code only.',
             param_relay: 'Relay address',
-            param_relay_descr: 'WebSocket relay. Default is wss://itty.ws/c/',
+            param_relay_descr: 'WebSocket relay. Default is ' + DEFAULT_RELAY,
+            param_invite: 'Invite address',
+            param_invite_descr: 'Base link used in the QR code. Default is ' + DEFAULT_INVITE,
             head_title: 'LParty - available rooms',
             create_btn: 'Create room from URL',
             join_code_btn: 'Join by room code',
@@ -165,7 +174,9 @@
             param_publish: 'Показывать комнату в списке',
             param_publish_descr: 'Выключите, чтобы в вашу комнату можно было войти только по коду.',
             param_relay: 'Адрес реле',
-            param_relay_descr: 'WebSocket-реле. По умолчанию wss://itty.ws/c/',
+            param_relay_descr: 'WebSocket-реле. По умолчанию ' + DEFAULT_RELAY,
+            param_invite: 'Адрес приглашения',
+            param_invite_descr: 'Базовая ссылка для QR-кода. По умолчанию ' + DEFAULT_INVITE,
             head_title: 'LParty - список комнат',
             create_btn: 'Создать комнату по ссылке',
             join_code_btn: 'Войти по коду комнаты',
@@ -218,10 +229,6 @@
         }
     };
     var T = i18n[_rawLang] || i18n['en'];
-
-    var DEFAULT_RELAY = 'wss://itty.ws/c/';
-    var LOBBY_CHANNEL = 'lparty-lobby-v1';
-    var ROOM_PREFIX = 'lparty-r-';
 
     var LOBBY_COLLECT_MS = 1500;
     var JOIN_TIMEOUT_MS = 6000;
@@ -310,6 +317,11 @@
         if (!v) v = DEFAULT_RELAY;
         if (v.charAt(v.length - 1) !== '/') v += '/';
         return v;
+    }
+
+    function getInvite() {
+        var v = (Lampa.Storage.get('lparty_invite', '') || '').toString().trim();
+        return v || DEFAULT_INVITE;
     }
 
     function safe(s) {
@@ -1002,7 +1014,7 @@
     }
 
     function inviteLink() {
-        return withRoomParam('https://siaivo.isroot.in/lparty/');
+        return withRoomParam(getInvite());
     }
 
     function connectRoom(roomId, password, onReady) {
@@ -2314,6 +2326,12 @@
             component: 'lparty',
             param: { name: 'lparty_relay', type: 'input', values: '', default: DEFAULT_RELAY, placeholder: DEFAULT_RELAY },
             field: { name: T.param_relay, description: T.param_relay_descr }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'lparty',
+            param: { name: 'lparty_invite', type: 'input', values: '', default: DEFAULT_INVITE, placeholder: DEFAULT_INVITE },
+            field: { name: T.param_invite, description: T.param_invite_descr }
         });
     }
 
