@@ -9,7 +9,7 @@
 
     var META = {
         name: 'LParty',
-        version: '1.4.1',
+        version: '1.4.2',
         author: 'nrsua, levende'
     };
 
@@ -1411,6 +1411,12 @@
             var state = m.s === 'playing' ? 'playing' : 'paused';
             var position = m.p || 0;
 
+            // вхідна пауза на кінці серії — це природне завершення відео у партнера, а не дія користувача
+            if (m.t === 'act' && state === 'paused') {
+                var d = getVideo() && getVideo().duration;
+                if (d && isFinite(d) && d > 0 && position >= d - 1.0) return;
+            }
+
             if (initialSyncLock) {
                 targetInitialState = { state: state, position: position, atServerTime: e.date };
                 return;
@@ -2094,6 +2100,7 @@
 
             if (isRewinding()) { lastUserActionTime = Date.now(); return; }
             if (vid._lp_buffering || vid.readyState < 3) { vid._lp_buffer_paused = true; return; }
+            if (vid.ended) return;
             lastUserActionTime = Date.now();
             sendSync('paused', 'paused');
         });
@@ -2144,6 +2151,7 @@
         if (pendingAct) return;
         var vid = getVideo();
         if (!vid) return;
+        if (vid.ended) return;
         sendSync(vid.paused ? 'paused' : 'playing', null);
     }, SYNC_HEARTBEAT_MS);
 
